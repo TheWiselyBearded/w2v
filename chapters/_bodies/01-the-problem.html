@@ -1,0 +1,185 @@
+<header class="chap-head">
+  <span class="num">Part I · Chapter 1</span>
+  <h1>Seeing Small Things in a Big Sky</h1>
+  <p class="lede">Before we write a line of code, we have to understand exactly what makes this
+  problem hard — because every design decision in the rest of the book is a response to one of
+  these difficulties. Vision in the sky is not vision on the ground made harder. It is a
+  different problem.</p>
+</header>
+
+<p>Point a camera out of a moving aircraft and ask it a simple question: <em>is there anything
+else up here with me?</em> A person answers instantly. They glance at the sky, notice the
+speck that is a plane and ignore the speck that is a bird, and think nothing of it. That
+effortless glance hides an enormous amount of work, and when we try to teach a machine to do
+the same thing, every hidden difficulty comes due at once.</p>
+
+<p>Let us make the problem concrete. A camera on a flying platform records video. Somewhere in
+that video — not in every frame, and rarely in the center — there may be another aircraft, a
+drone, a bird, or a balloon. Our job is to draw a tight box around each one, say what it is,
+and do it reliably enough that a system downstream can trust the answer. That is the entire
+task. It sounds modest. It is brutally hard, for four reasons that will shape everything that
+follows.</p>
+
+<h2><span class="secn">1.1</span> The object is almost nothing</h2>
+
+<p>The first and defining difficulty is <strong>size</strong>. An aircraft you need to notice
+while there is still time to react might be two or three kilometers away. Through a normal lens
+at that distance, it occupies a patch of image maybe <strong>ten to thirty pixels</strong> on a
+side. On a typical multi-megapixel sensor frame, that object is well under one-thousandth of one
+percent of the pixels. Everything else — 99.999% of the image — is empty sky, cloud, or ground.</p>
+
+<div class="figure">
+<pre>
+   a 2448 × 2048 sensor frame              the object, actual size
+  ┌─────────────────────────────┐
+  │                             │           ▮  ← ~20 px
+  │            ·                │
+  │                             │          A twenty-pixel target on a five-megapixel
+  │                             │          frame is 0.0003% of the image. Find it,
+  │                             │          box it, and do not raise a false alarm on
+  │                             │          any of the other 5 million pixels.
+  └─────────────────────────────┘
+</pre>
+<figcaption><b>The needle and the haystack are made of the same thread.</b> The hard part is
+not that the object is small — it is that the object is small <em>and</em> looks a great deal
+like the clutter it hides in.</figcaption>
+</div>
+
+<p>A twenty-pixel object carries almost no information. There is no wing shape to recognize, no
+tail number, often not even a definite silhouette — just a smudge of a few pixels that is
+slightly different from the sky behind it. We call this the <span class="term">small-object
+regime</span>: the domain where an object is defined by a handful of pixels rather than by its
+recognizable form. Most of the famous results in object detection were achieved on objects that
+fill a comfortable fraction of the frame — a pedestrian, a car, a dog. Almost none of that
+intuition survives contact with a twenty-pixel target, and a surprising number of standard
+techniques quietly fail. A network that shrinks its input image for speed can erase the object
+entirely before the first layer ever runs. We will spend an entire chapter (Chapter&nbsp;8) on
+the machinery invented specifically to keep small objects alive.</p>
+
+<h2><span class="secn">1.2</span> The background is an adversary</h2>
+
+<p>If the sky were a uniform blue, a twenty-pixel object would be easy — any bright speck on a
+flat field stands out. The sky is not uniform. It has clouds with hard edges, sun glare, haze
+gradients, and — the moment the camera tilts down toward the horizon — an entire second world of
+terrain: ridgelines, buildings, roads, glinting water, and the ten thousand small high-contrast
+specks of a landscape. Every one of those specks is a potential <span class="term">false
+positive</span>: a detection the model makes where nothing of interest exists.</p>
+
+<p>This is where the problem stops being about the object and starts being about everything that
+is <em>not</em> the object. A detector that finds every real aircraft but also flags one cloud
+edge per frame is useless — at thirty frames per second it invents thirty ghosts a second. The
+governing quantity in this field is not really accuracy in the usual sense; it is the balance
+between catching real objects and resisting the overwhelming temptation to shout at clutter. We
+will give that balance a precise name and a precise metric in Chapter&nbsp;9, because you cannot
+manage what you cannot measure — and the aggregate accuracy numbers everyone quotes hide exactly
+this failure.</p>
+
+<div class="note note--warn">
+  <div class="note__label">⚠ The asymmetry of errors</div>
+  <p>The two ways to be wrong are not equal, and their balance depends entirely on the system.
+  Miss a real object (a <strong>false negative</strong>) and a sense-and-avoid system may fail to
+  react. Raise a false alarm (a <strong>false positive</strong>) and a monitoring system drowns
+  its operators in noise until they stop trusting it. Which error is worse is not a machine-learning
+  question — it is a system-design question, and it must be answered <em>before</em> you choose a
+  threshold, not after. Keep this asymmetry in mind; it will decide numbers you set in nearly
+  every later chapter.</p>
+</div>
+
+<h2><span class="secn">1.3</span> A bird is not a drone, except when it is</h2>
+
+<p>Suppose you clear the first two hurdles: you find the small speck and you are confident it is
+a real object, not clutter. Now you must say <em>what</em> it is. And here the world is
+uncooperative, because at twenty pixels a distant quadcopter, a soaring bird, and a far-off
+light aircraft can be nearly indistinguishable. The features that separate them for a human
+observer — the flap of wings, the blur of rotors, the steadiness of powered flight — may span
+only a pixel or two, or may not be visible at all in a single frame.</p>
+
+<p>This forces an early and consequential decision: <strong>what is your taxonomy, and what do
+you do with the things that don't fit it?</strong> A system that must distinguish drones from
+birds needs training data where that distinction is reliably labeled — which is far harder to
+obtain than it sounds. A system that only needs to know <em>something is there</em> can treat
+every airborne object as a single class and sidestep the confusion entirely. Neither is right in
+the abstract; the choice follows from what the system is for. We will return to this in
+Chapter&nbsp;5 when we design the data records, and again in Chapter&nbsp;9 when we discover that
+measuring the wrong taxonomy can make a perfectly good detector look broken.</p>
+
+<h2><span class="secn">1.4</span> Everything is moving</h2>
+
+<p>The final difficulty is that the camera itself flies. On the ground, a fixed security camera
+sees a still background across which objects move — a fact you can exploit ruthlessly, since
+anything that moves is interesting. In the air, the whole scene moves. The camera's own motion
+drags clouds, terrain, and horizon across the frame, so "it moved" no longer means "it matters."
+The simplest and most powerful trick in ground-based detection — subtract the static background —
+is gone.</p>
+
+<p>Motion also blurs. A fast platform and a fast target smear the few precious pixels of the
+object across the sensor during the exposure, and a smear is even harder to tell from a cloud
+than a crisp speck. And because the object is moving relative to you, it grows: a speck on a
+collision course is three pixels now and forty pixels in ten seconds. A system that only works at
+one size is a system that works for one instant. This is why we insist, from Chapter&nbsp;2
+onward, on treating the input as <span class="term">sequences</span> — timestamped, ordered video
+with stable object identities — rather than as a shoebox of unrelated images. The time dimension
+is not a complication to be averaged away. It is a signal, and later (Chapter&nbsp;11) it becomes
+the backbone of tracking.</p>
+
+<h2><span class="secn">1.5</span> Why not just collect a lot of data?</h2>
+
+<p>A reasonable reader will object: computer vision is a solved problem given enough labeled data
+— so go collect a million labeled frames of aircraft-mounted footage and train on them. This is
+exactly the right instinct, and it runs into a wall that defines the strategy of the entire book.</p>
+
+<p>The data barely exists. Footage of the specific thing you care about — a particular object,
+seen from a particular kind of platform, in the range of conditions your system will actually
+face — is scarce, expensive, and often legally encumbered. And even where raw footage exists,
+<strong>every frame must be labeled</strong>: a human, or something standing in for one, has to
+draw the correct box around every twenty-pixel speck in millions of frames, without missing the
+faint ones or hallucinating clutter. Labeling a twenty-pixel object correctly is hard even for
+people. Labeling millions of them is an industrial undertaking.</p>
+
+<div class="kpis">
+  <div class="kpi"><span class="kpi__v">real</span><span class="kpi__k">is scarce</span><span class="kpi__d">expensive to fly, legally encumbered</span></div>
+  <div class="kpi"><span class="kpi__v">labels</span><span class="kpi__k">are the cost</span><span class="kpi__d">a human boxing 20-px specks by the million</span></div>
+  <div class="kpi"><span class="kpi__v">synthetic</span><span class="kpi__k">is abundant</span><span class="kpi__d">and labels itself, for free, exactly</span></div>
+  <div class="kpi"><span class="kpi__v">the gap</span><span class="kpi__k">is the catch</span><span class="kpi__d">simulated ≠ real — the whole of Part III</span></div>
+</div>
+
+<p>So the field is pushed, almost inevitably, toward a second source: <strong>synthetic
+data</strong> — imagery rendered by a simulator, where the computer already knows the exact
+position and identity of every object because it placed them there. Synthetic data is abundant,
+cheap, and perfectly labeled by construction. It is also, crucially, <em>not real</em>, and the
+distance between a rendered sky and a photographed one is the central technical drama of this
+book. Part II is about manufacturing synthetic truth well; Part III is about the price you pay
+for it and how to pay less. But the strategic picture is already clear from here: you will build
+your own worlds because the real one will not give you enough labeled examples, and then you will
+spend most of your effort earning back the realism you gave up.</p>
+
+<h2><span class="secn">1.6</span> The shape of the answer</h2>
+
+<p>Every difficulty in this chapter has a response, and those responses are the chapters ahead.
+Small objects demand <strong>tiling</strong> and careful resolution management (Ch.&nbsp;8).
+Clutter demands a relentless focus on <strong>false-alarm rate</strong> and honest metrics
+(Ch.&nbsp;9). Class confusion demands a deliberate <strong>taxonomy</strong> and evaluation that
+respects it (Ch.&nbsp;5, 9). Motion demands <strong>sequence-aware</strong> data and tracking
+(Ch.&nbsp;2, 11). Data scarcity demands <strong>synthetic generation</strong> and a disciplined
+campaign to close the <strong>sim-to-real gap</strong> (Ch.&nbsp;3–7).</p>
+
+<p>None of these responses is a model. Every one of them is a piece of the pipeline. That is not
+an accident — it is the thesis of the book arriving on schedule. Before we can build any of it,
+though, we need the skeleton that holds it all together: a way of moving data through this system
+so that a renderer, a labeler, a trainer, and an evaluator built by different hands on different
+days can all agree on what they are looking at. That skeleton is the subject of Chapter&nbsp;2.</p>
+
+<div class="takeaways">
+  <span class="kicker">Takeaways</span>
+  <ul>
+    <li><b>Four difficulties define the problem:</b> tiny objects, adversarial backgrounds, class
+    confusion, and universal motion. Each drives a later chapter.</li>
+    <li><b>False alarms, not misses, usually dominate.</b> The governing quantity is the balance
+    between catching real objects and resisting clutter — and the right balance is a system
+    decision.</li>
+    <li><b>Time is signal, not noise.</b> Treat the input as ordered sequences with stable object
+    identities, never as a bag of loose images.</li>
+    <li><b>Real data will not be enough,</b> so you will manufacture synthetic data — and then
+    spend most of the book earning back the realism you traded away.</li>
+  </ul>
+</div>

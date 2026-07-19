@@ -1,0 +1,278 @@
+<header class="chap-head">
+  <span class="num">Part II · Chapter 4</span>
+  <h1>Truth From Geometry <em>— labeling a world you already know.</em></h1>
+  <p class="lede">In a simulator you never have to guess where an object is — you placed it there.
+  This chapter builds a labeling pipeline that computes each box directly from 3D geometry, shows
+  why those labels are renderer-independent, and tells the story of a bug that was invisible
+  precisely because everything agreed with everything else.</p>
+</header>
+
+<p>In <a href="03-synthetic-worlds.html">Chapter&nbsp;3</a> we built worlds: a camera flying
+through a scene full of aircraft, drones, and birds, with a render engine turning that scene into
+pixels. Now we need the other half of a training example — the <strong>label</strong>. For every
+frame, we need a tight box around every object, its class, its identity, and how visible it is,
+in exactly the canonical shape Chapter&nbsp;2 demanded. The good news, and the whole reason we
+built our own worlds in the first place, is that in a simulator the answer is not hidden. The
+computer knows the precise 3D position of every object and the exact pose of the camera. The
+label is not something to be discovered. It is something to be <em>computed</em>.</p>
+
+<h2><span class="secn">4.1</span> Two ways to get a label</h2>
+
+<p>There are two fundamentally different ways to produce a box in a simulated scene, and the
+choice between them shapes everything that follows.</p>
+
+<p>The first is to <strong>scrape</strong> the label from the renderer. Modern render engines can
+be asked, for each pixel, which object it belongs to — a so-called segmentation or instance pass.
+Collect all the pixels tagged with a given object, take their bounding rectangle, and you have a
+box. This is easy and it is exact <em>for what the renderer drew</em>.</p>
+
+<p>The second is to <strong>compute the label analytically</strong> from geometry. You know the
+object's position in the world. You know where the camera is and which way it points. So you do
+the projection yourself, with arithmetic: take the object's 3D extent, push it through a camera
+model, and read off the pixel box. No render pass required.</p>
+
+<p>The analytic path has one property that makes it the backbone of this chapter: it is
+<span class="term">renderer-independent</span> — it depends only on the scene geometry, not on
+which engine drew the picture. The identical labeling code produces the identical box whether the
+frame was rendered by Unity, by NVIDIA Omniverse, or by a mock renderer that draws nothing but a
+dot. That is the <a href="02-the-system.html">canonical-record narrow waist</a> from Chapter&nbsp;2
+reaching into the labeler: a source adapter can hand our geometry to <em>one</em> labeling
+function and get back canonical labels, no matter what backend produced the imagery.</p>
+
+<h2><span class="secn">4.2</span> A pinhole camera, from scratch</h2>
+
+<p>To project a point ourselves we need a camera model, and the simplest one that works is the
+<span class="term">pinhole camera</span>: an idealized camera where all light passes through a
+single point, so the world maps onto the image by straight lines. It has two groups of numbers.
+The <span class="term">extrinsics</span> are the camera's pose in the world — <em>where</em> it is
+(a position) and <em>which way</em> it faces (an orientation). The <span class="term">intrinsics</span>
+are the camera's internal optics — its field of view (equivalently, its focal length) and its
+principal point, the pixel the optical axis passes through.</p>
+
+<p>Projecting one 3D world point to one pixel is a short sequence of steps. We will do it in a
+right-handed world with the screen's y-axis pointing <em>down</em> — a convention we must state
+out loud, because §4.5 is the story of what happens when you don't.</p>
+
+<div class="figure">
+<pre>
+   WORLD SPACE                         CAMERA SPACE            IMAGE
+                                       (right/up/forward)
+        · P (object)                        Z (fwd)           (0,0)┌─────┐
+       /                                    /                      │  ·P'│
+      /                                    /                       │     │
+   [cam]───────────►                 [cam]───► X (right)           └─────┘(1,1)
+     pose = position + orientation        │
+                                          Y (up)
+   step 1: subtract camera position   →  point relative to camera
+   step 2: rotate into right/up/fwd   →  (X_cam, Y_cam, Z_cam)
+   step 3: perspective divide by Z    →  x = f·X_cam / Z_cam,  y = f·Y_cam / Z_cam
+   step 4: map to viewport 0..1, then →  pixel = viewport × resolution
+</pre>
+<figcaption><b>Four steps from a point in the world to a pixel on the sensor.</b> Translate,
+rotate, divide by depth, scale. The perspective divide — dividing by <code>Z_cam</code> — is what
+makes distant things small; everything else is bookkeeping about coordinate frames.</figcaption>
+</div>
+
+<p>In code the sequence is almost as short as the diagram:</p>
+
+<p class="code-label">project one world point to a normalized viewport coordinate</p>
+<pre><code>def project(p_world, cam):
+    # 1. translate: point relative to the camera
+    rel = p_world - cam.position
+    # 2. rotate into the camera's right/up/forward basis
+    x = dot(rel, cam.right)
+    y = dot(rel, cam.up)
+    z = dot(rel, cam.forward)      # camera-space depth
+    # 3. CULL anything at or behind the lens
+    if z <= 0:
+        return None                # object is behind the camera
+    # 4. perspective divide, then map to a 0..1 viewport
+    u = 0.5 + (x / z) / (2 * tan(cam.h_fov / 2))
+    v = 0.5 - (y / z) / (2 * tan(cam.v_fov / 2))   # y-down screen
+    return (u, v)                  # multiply by resolution LATER</code></pre>
+
+<div class="note note--def">
+  <div class="note__label">◇ Why we stop at a 0..1 viewport</div>
+  <p>Notice the function returns numbers between 0 and 1, not pixels. That is deliberate. If you
+  bake the resolution into the projection, a label made at 720p is wrong at 2448px and you will
+  re-derive the same box for every output size. Keep the geometry in normalized
+  <span class="term">viewport coordinates</span> — fractions of the frame — and multiply by the
+  resolution only at the very end. The same scene then labels <em>identically</em> at any
+  resolution, which is exactly what a pipeline that renders the same world at many sizes needs.</p>
+</div>
+
+<h2><span class="secn">4.3</span> From a point to a box: amodal, modal, and the edges of the frame</h2>
+
+<p>An object is not a point; it has extent. Project the eight corners of its 3D bounding volume,
+take the minimum and maximum of the resulting viewport coordinates, and you have a 2D box. But
+<em>which</em> box? There are two, and confusing them corrupts training data quietly.</p>
+
+<p>The <span class="term">amodal box</span> is the rectangle around the object's <em>full</em>
+extent, including the parts you cannot see — the piece hidden behind a cloud, or the wing that
+runs off the edge of the frame. The <span class="term">modal box</span> is the rectangle around
+only the <em>visible</em> part. For a distant aircraft peeking past a ridgeline, the amodal box
+says "here is the whole aircraft"; the modal box says "here is the sliver of it you can actually
+see."</p>
+
+<p>For our small, distant targets the amodal box is usually what you want to learn from — it is
+the honest answer to "where is the object" — but you record visibility alongside it so a trainer
+can decide for itself. Two edge cases must be handled with care, because a target that misbehaves
+should degrade cleanly rather than poison the dataset:</p>
+
+<ul>
+  <li><strong>Clip to the viewport.</strong> An amodal box may extend past the frame edge. Clamp
+  its pixel coordinates to the image bounds so a consumer never sees a box hanging in negative
+  space — while remembering that the underlying object was larger.</li>
+  <li><strong>Cull what is behind the camera.</strong> A point with non-positive camera-space
+  depth (<code>z&nbsp;≤&nbsp;0</code>) is behind the lens. The perspective divide would happily
+  produce a finite, <em>completely wrong</em> pixel for it — a mirror-image ghost. The labeler
+  must drop such objects, so a target that overflies the camera and passes behind it simply
+  disappears from the labels instead of leaving a phantom box on the far side of the sky.</li>
+</ul>
+
+<h2><span class="secn">4.4</span> How much can you actually see? Occlusion by ray sampling</h2>
+
+<p>The canonical record carries a <code>visible_fraction</code> field, and now we have to fill it
+honestly. Geometry alone tells us where an object <em>would</em> appear; it does not tell us
+whether a cloud, a hill, or another aircraft is in the way. To measure real visibility we sample.</p>
+
+<p>The idea: cast a spray of rays from the camera toward points across the object's silhouette.
+For each ray, ask two questions. Does it hit <em>this object's</em> own collider (is the ray aimed
+at the object at all)? And does it reach the object first when tested against the <em>whole
+scene</em>, or does something else block it? The fraction of silhouette rays that survive the
+full-scene test — hitting our object before anything else — is the <span class="term">visible
+fraction</span>.</p>
+
+<p class="code-label">visibility as a ratio of surviving rays</p>
+<pre><code>hits_object = 0     # rays that strike the object in isolation
+hits_first  = 0     # rays that reach the object before any occluder
+for ray in silhouette_rays(object, cam):
+    if raycast(ray, object_only_collider):
+        hits_object += 1
+        if raycast(ray, full_scene).first_hit is object:
+            hits_first += 1
+visible_fraction = hits_first / max(hits_object, 1)</code></pre>
+
+<p>Then apply thresholds. Above a high bar — say <code>0.95</code> — call the object fully
+visible. Below a small floor — say <code>0.03</code> — treat it as effectively invisible, and in
+<em>modal</em> labeling drop a fully-occluded target entirely rather than emit a box around a thing
+you cannot see. Those exact numbers are not laws of nature; they are project configuration, tuned
+to how your trainer treats partially-hidden objects, and — like the promotion-gate thresholds in
+Chapter&nbsp;2 — they belong in a config file, not buried in code.</p>
+
+<h2><span class="secn">4.5</span> The bug that agreed with itself</h2>
+
+<div class="case">
+  <div class="case__head">
+    <h3>The label and the picture matched perfectly. Both were upside down.</h3>
+    <span class="verdict verdict--crit">What broke: a self-consistent flip</span>
+  </div>
+  <p>Building the camera's basis vectors, someone set the up-vector as
+  <code>up = cross(right, forward)</code>. With the handedness in play, that cross product did not
+  point up. It pointed <em>down</em>. Every projection was therefore vertically flipped: objects in
+  the top of the world landed in the bottom of the image.</p>
+  <p>Here is why it survived for so long. The <em>same</em> flawed basis was used to build both the
+  analytic labels <em>and</em> the mock renderer that drew the test imagery. So the labels and the
+  pictures were flipped in exactly the same way — and therefore agreed with each other perfectly.
+  Every debug overlay showed a box sitting neatly on its object. Every internal consistency check
+  — "does the label land where the render drew the dot?" — passed with flying colors. The pipeline
+  was radiantly, confidently wrong.</p>
+  <div class="stats">
+    <div class="stat"><span class="v">100%</span><span class="l">overlays looked correct</span></div>
+    <div class="stat"><span class="v">0</span><span class="l">consistency checks failed</span></div>
+    <div class="stat"><span class="v">flipped</span><span class="l">every single label</span></div>
+    <div class="stat"><span class="v">1</span><span class="l">absolute test that caught it</span></div>
+  </div>
+  <p>It was caught only by a test that refused to consult the pipeline's own conventions. The test
+  asserted the screen axes from the outside: place a world point directly <em>above</em> the
+  camera; it <em>must</em> land in the <em>upper</em> half of the image, and screen-y must increase
+  <em>downward</em>. That single ground-truth anchor — right-handed world, y-down screen, stated
+  independently of any code the pipeline used — failed instantly and pointed straight at the
+  inverted up-vector.</p>
+</div>
+
+<blockquote>Agreement between two things you built the same way proves consistency, not
+correctness. You need at least one test anchored to ground truth <em>outside</em> your own
+conventions.</blockquote>
+
+<p>This is the most important lesson in the chapter, so it is worth saying without metaphor. When
+the labeler and the renderer share code, share conventions, or share an author, they will share
+their mistakes — and every check that compares one to the other is blind to exactly those
+mistakes. The only cure is an <em>absolute</em> test: an assertion about the world that does not
+route through the machinery under test. "Up is up" sounds too trivial to write down. It was the
+one thing that could have been written down.</p>
+
+<h2><span class="secn">4.6</span> The other path: renderer-derived labels</h2>
+
+<p>Analytic labels are not the only option, and sometimes they are not the best one. Modern
+synthetic-data tools — NVIDIA Omniverse Replicator's annotators are the reference example — can
+emit boxes directly from the render, and they can give you both flavors at once: a
+<strong>loose</strong> (amodal) box around the whole object and a <strong>tight</strong> (visible)
+box around just the pixels that survived occlusion. When photoreal fidelity matters and you want a
+pixel-accurate visible mask that reflects exactly what the sensor saw, this is hard to beat with
+arithmetic.</p>
+
+<p>It has its own hazards, and each one has a defensive response:</p>
+
+<ul>
+  <li><strong>One object is many meshes.</strong> A single aircraft is often a hierarchy of child
+  meshes — fuselage, wings, gear — each of which the annotator may box separately. You must
+  <strong>union</strong> the per-mesh boxes back into one object box, or you will train on
+  fragments of aircraft.</li>
+  <li><strong>Visibility is sometimes unknown.</strong> When the annotator cannot report occlusion,
+  fall back to an <strong>area ratio</strong> — the tight box's area over the loose box's — as a
+  rough visible fraction rather than emitting nothing.</li>
+  <li><strong>Fail closed.</strong> If the annotator data is missing or malformed, the labeler must
+  <em>abort the frame</em>, not shrug and emit a best guess. This is the Chapter&nbsp;2 rule again:
+  a malformed record must never travel one step deeper than where it was born. A silently bad label
+  is worse than a missing one.</li>
+</ul>
+
+<div class="note note--good">
+  <div class="note__label">✓ Keep the analytic projection as a per-frame QA check</div>
+  <p>Here is the trick that ties both paths together. Even when you trust the renderer's labels,
+  keep the analytic projection running <em>alongside</em> them, and emit their agreement — for
+  instance the mean <span class="term">IoU</span> (intersection-over-union: overlap area divided by
+  union area, 1.0 for a perfect match) between the analytic box and the annotator box on every
+  frame. Mean&nbsp;IoU&nbsp;≈&nbsp;1 proves your camera convention and your label plumbing are
+  correct. Mean&nbsp;IoU&nbsp;≈&nbsp;0 means your pose math is wrong — it is exactly the alarm that
+  would have screamed on the first frame of the flipped-vector bug. It is a cheap check with a
+  huge blast radius, and it costs one extra projection per object.</p>
+</div>
+
+<h2><span class="secn">4.7</span> Which path, and why it doesn't matter downstream</h2>
+
+<p>So: analytic or renderer-derived? Prefer <strong>analytic</strong> when you want the same labels
+across many rendering backends, resolution independence for free, and a labeler simple enough to
+test against absolute ground truth. Prefer <strong>renderer-derived</strong> when photoreal
+fidelity and exact, pixel-accurate visible masks matter more than cross-backend identity — when the
+picture <em>is</em> the product and you want labels that match its every pixel.</p>
+
+<p>The quiet payoff of Chapter&nbsp;2 is that a consumer never has to know which you chose. Both
+paths empty into the same canonical record — a box, a class, an identity, a visible fraction — and
+everything downstream reads only that. The labeler is one more piece of the pipeline, and the
+pipeline is the product: build it so its labels are correct against the world itself, not merely
+consistent with the picture next to them, and every stage after it inherits truth instead of
+inheriting your assumptions. In <a href="05-datasets.html">Chapter&nbsp;5</a> we take these labeled
+frames and freeze them into the immutable, content-addressed datasets that make a result something
+you can trust rather than something you happen to remember.</p>
+
+<div class="takeaways">
+  <span class="kicker">Takeaways</span>
+  <ul>
+    <li><b>Compute labels from geometry, don't just scrape them.</b> You placed the objects and you
+    know the camera, so project them yourself — analytic labels are renderer-independent and
+    identical across Unity, Omniverse, or a mock backend.</li>
+    <li><b>Project in a normalized viewport, scale at the end.</b> Keep the math in 0..1 fractions
+    and multiply by resolution last, so the same scene labels identically at 720p and 2448px.</li>
+    <li><b>Know your box.</b> Amodal is the full extent, modal is the visible part; clip to the
+    viewport, cull anything behind the camera, and record visibility by ray-sampling so nothing
+    degrades into a phantom.</li>
+    <li><b>Self-consistency is not correctness.</b> A bug shared by your labeler and your renderer
+    is invisible to every check that compares them. Anchor at least one test to ground truth
+    outside your own conventions.</li>
+    <li><b>Run the analytic projection as QA even when you trust the renderer.</b> Mean IoU between
+    analytic and annotator boxes near 1 proves the pose math; near 0 catches the flip on frame
+    one.</li>
+  </ul>
+</div>

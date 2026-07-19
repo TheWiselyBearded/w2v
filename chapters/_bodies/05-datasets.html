@@ -1,0 +1,286 @@
+<header class="chap-head">
+  <span class="num">Part II · Chapter 5</span>
+  <h1>Datasets That Don't Lie <em>— immutable ground for honest results.</em></h1>
+  <p class="lede">A dataset is the ground your model stands on. If that ground shifts underneath
+  you — a reshuffled split, a leaked test frame, a silent relabel — every number you report
+  becomes a lie you can no longer detect. This chapter builds datasets that cannot quietly lie:
+  frozen, content-addressed, leakage-guarded, and license-gated.</p>
+</header>
+
+<p>In Chapter&nbsp;2 we promised <a href="02-the-system.html">immutable lineage</a> and moved on.
+This is the chapter where that promise becomes code. Everything so far — the canonical record, the
+schema contract, the sequences with stable object identities — was about getting <em>one frame</em>
+right. Now we assemble millions of frames into the thing a trainer actually consumes: a dataset.
+And a dataset is where the most dangerous failures in this entire field hide, because they do not
+announce themselves as failures. They announce themselves as <strong>good news</strong> — a
+validation score that climbs, a model everyone celebrates — right up until the moment the system
+meets genuinely new footage and collapses.</p>
+
+<p>The thesis of this chapter is blunt: a suspiciously good number is a bug report. Most of the
+machinery below exists to make it impossible for a dataset to flatter your model behind your back.</p>
+
+<h2><span class="secn">5.1</span> A dataset is a snapshot, not a folder</h2>
+
+<p>The naive way to hold data is a directory. You make a <code>data/</code> folder, you drop frames
+in it, and when you get more frames you drop those in too. It is the most natural thing in the
+world and it destroys reproducibility on contact. The folder that trained Monday's model is not the
+folder that trained Thursday's, because on Wednesday someone added footage. "Trained on
+<code>data/</code>" names a moving target. Two people can run the same command a week apart, get
+different results, and have no way to explain why — the words they used to describe their data were
+identical and the data was not.</p>
+
+<p>So we forbid the folder. A dataset in this system is an <span class="term">immutable
+snapshot</span> — a frozen collection of frames whose identity is a hash of its own contents. Not a
+name someone chose; a fingerprint the contents compute for themselves. A snapshot is named like
+this:</p>
+
+<p class="code-label">a content-addressed snapshot identifier</p>
+<pre><code>datasets/skyval@9f3c1a7be2d40518
+          │        └─ 16 hex chars derived from a hash of EVERYTHING in the snapshot:
+          │           the frame content hashes, the split assignments, the taxonomy,
+          │           the per-source provenance — the full manifest.
+          └─ a human-friendly name, for people. The hash is for the machine.</code></pre>
+
+<p>The behavior that falls out of this is exactly what reproducibility needs. Build a snapshot twice
+from the same inputs and you get the <em>same hash</em> — so the second build is a no-op that simply
+reuses the snapshot already on disk. This is a <span class="term">deterministic rebuild</span>: same
+inputs in, same identifier out, no wasted work. Add one sequence and you get a <em>new</em> hash and
+therefore a <em>new</em> snapshot — while the old one still sits there, byte-for-byte unchanged,
+ready to reproduce yesterday's result. Nothing is ever overwritten. Nothing is ever added to. Every
+change makes a new frozen thing and leaves the old frozen thing alone.</p>
+
+<div class="note note--def">
+  <div class="note__label">◇ Content-addressed</div>
+  <p>An artifact is <em>content-addressed</em> when its name is computed from its contents rather
+  than assigned by a human. Change the contents by a single frame and the name changes too. This is
+  the same idea that lets a version-control system trust a commit hash: the identifier is a promise
+  about exactly what is inside, and the promise cannot be broken without the identifier changing.</p>
+</div>
+
+<h2><span class="secn">5.2</span> Three splits, and one that must stay frozen</h2>
+
+<p>Every dataset is divided into three parts, and the discipline around that division is where
+honesty is won or lost. Define the terms precisely, because sloppiness here is the root of the
+whole chapter's cautionary tale.</p>
+
+<p>The <span class="term">train split</span> is the data the model learns from — it sees these
+frames over and over and adjusts its weights to fit them. The <span class="term">validation
+split</span> is data you look at often but never train on: you use it to tune settings, monitor
+progress, and pick which checkpoint to keep. The <span class="term">test split</span> is a frozen,
+untouched holdout you look at rarely — ideally once, at the very end. Its entire reason for existing
+is to estimate real-world performance on data that had <em>no</em> influence, direct or indirect, on
+the model you built.</p>
+
+<blockquote>The test set exists to estimate real-world performance, so it must never influence
+training or model selection. The instant it does, it stops measuring the world and starts measuring
+your dataset.</blockquote>
+
+<p>That cardinal rule sounds easy to keep. It is not — because the most common way to violate it
+does not look like cheating at all. It looks like a perfectly reasonable line of code that splits
+your data.</p>
+
+<h2><span class="secn">5.3</span> The leakage trap: split by sequence, not by frame</h2>
+
+<p>Here is the single most important lesson in this chapter. Recall from Chapter&nbsp;1 that we
+treat data as <em>sequences</em>: ordered video, thirty frames a second. In one-thirtieth of a
+second a distant aircraft moves almost nowhere. Frame N and frame N+1 are near-identical twins — the
+same object, the same background, shifted by a pixel or two of noise.</p>
+
+<p>Now suppose you split your data the obvious way: pour every frame into one big pile, shuffle it,
+and deal the frames out — 80% to train, 10% to validation, 10% to test. It feels rigorous. It is a
+disaster. Frame N lands in train and its near-identical twin frame N+1 lands in test. The model
+trains on frame N, is "tested" on frame N+1, and of course it aces the test — it has effectively
+already seen the answer. This is <span class="term">data leakage</span>: information from the test
+set bleeding into training, so that your test score measures memorization instead of generalization.
+The number looks brilliant and means nothing.</p>
+
+<div class="figure">
+<pre>
+  A clip: 6 consecutive frames of ONE aircraft (each ≈ the last)
+
+    f1    f2    f3    f4    f5    f6
+   [▮]   [▮]   [▮]   [▮]   [▮]   [▮]
+
+  ── SPLIT BY FRAME (shuffle then deal) — WRONG ─────────────────
+    f1→train  f2→TEST  f3→train  f4→val  f5→train  f6→TEST
+    The model trains on f1,f3,f5 and is "tested" on f2,f6 —
+    frames one pixel different from what it just memorized.
+    Test score: 0.98.  Real-world score: collapses.
+
+  ── SPLIT BY SEQUENCE (assign the whole clip at once) — RIGHT ──
+    f1 f2 f3 f4 f5 f6  ── all → train   (or all → val, or all → test)
+    The whole clip moves as one atom. Test frames come from
+    clips the model has NEVER seen. Test score: honest.
+</pre>
+<figcaption><b>The trap and the fix, side by side.</b> Frame-level splitting scatters twins across
+the divide; sequence-level splitting keeps every frame of a clip on the same side of the wall. The
+only difference is <em>what you treat as the unit of assignment</em> — and it is the difference
+between a meaningful test score and a meaningless one.</figcaption>
+</div>
+
+<p>The fix is to change the unit of assignment. You never split frames. You split whole
+<strong>sequences</strong> — flights, clips, encounters — <em>atomically</em>: every frame of a
+sequence goes to exactly one split, together. Now the test set is made of clips the model has never
+laid eyes on, and its score finally answers the question you were actually asking.</p>
+
+<h2><span class="secn">5.4</span> Stable assignment: hash the identity, don't shuffle the list</h2>
+
+<p>Splitting by sequence fixes leakage, but <em>how</em> you assign each sequence to a split matters
+just as much, for a subtler reason. The tempting implementation is to list your sequences, shuffle
+the list with a random seed, and slice it into train/val/test. It works — until the day you add more
+sequences and re-run the build.</p>
+
+<p>A shuffle reshuffles <em>everything</em>. Add ten new sequences to the list, shuffle again, and
+sequences that were in train yesterday silently migrate to test today. "The same dataset" now means
+something different than it did on the last build, and any comparison across those builds is
+quietly invalid. You did not change your model and its test score moved anyway, and you will burn a
+day trying to explain a ghost.</p>
+
+<p>The fix is to make a sequence's split a <strong>deterministic function of its own identity</strong>,
+computed independently of every other sequence. You hash a stable key — the sequence's ID, mixed
+with a fixed seed — into a bucket, and the bucket decides the split:</p>
+
+<p class="code-label">hash-bucketed split assignment (deterministic, order-free)</p>
+<pre><code>def split_for(sequence_id: str, seed: str = "skyval-v1") -> str:
+    # hash a STABLE key -> an integer in [0, 100)
+    h = sha256(f"{seed}:{sequence_id}".encode()).hexdigest()
+    bucket = int(h[:8], 16) % 100
+    if bucket &lt; 80:   return "train"   # buckets  0–79
+    if bucket &lt; 90:   return "val"     # buckets 80–89
+    return "test"                       # buckets 90–99
+
+# The split of sequence "flight_0412" depends ONLY on its id and the
+# seed. Adding a thousand new sequences never moves it. Rebuild anytime,
+# on any machine, and every existing sequence lands where it always did.</code></pre>
+
+<p>Because the assignment reads only the sequence's own identity, adding sequences never moves the
+ones already there — new sequences simply fall into their own buckets and the existing partition is
+untouched. The split is stable across builds, across machines, across months. If you genuinely need
+a specific sequence pinned to validation or test — a hand-picked hard case, say — you do it with an
+explicit, recorded override, not a code edit. And because that override is part of the snapshot's
+contents, it changes the snapshot hash. As it should: you changed the dataset, so the dataset's
+fingerprint changed with it.</p>
+
+<h2><span class="secn">5.5</span> The leakage guard: fail the build on a cross-split duplicate</h2>
+
+<p>Sequence splitting stops the <em>expected</em> leak. It does not stop the accidental one. Someone
+copies a clip into two source folders. A public dataset is re-ingested under a new name. Two
+renders of the same scene come out pixel-identical. Now the same image content lives in two
+different splits even though your splitter did everything right — and your test score is
+contaminated again, silently.</p>
+
+<p>So we add a guard that does not trust anyone, including ourselves. At build time we compute a
+content hash (a SHA-256 of the image bytes) for every single frame, and we check that no content
+hash appears in more than one split. If the same image content is found on both sides of the wall,
+the build <strong>fails</strong> — loudly, with the offending hash and both file paths — and refuses
+to produce a snapshot at all.</p>
+
+<div class="note note--warn">
+  <div class="note__label">⚠ A failed build is the guard working</div>
+  <p>The first time the cross-split duplicate guard fires, the instinct is to disable it so the
+  build will finish. Resist it. A tripped guard is not an obstacle between you and a dataset; it is
+  the guard telling you the dataset you were about to build would have lied to you. Fix the
+  duplication — deduplicate the source, drop the re-ingest — and let the build succeed honestly.</p>
+</div>
+
+<h2><span class="secn">5.6</span> The license gate: fail closed on rights you don't have</h2>
+
+<p>A dataset can be perfectly split and still be unusable — because you did not have the right to
+use some of the data in it. Every source ingested into this system carries a
+<span class="term">provenance sidecar</span>: a small record, written at ingest time, that states
+where the evidence came from and under what license. The dataset build reads those sidecars and
+refuses to include any source whose license is incompatible with your intended <em>use</em>.</p>
+
+<p>We model intended use as a <span class="term">use profile</span>. The default profile is
+permissive-only: it rejects any source whose normalized license text carries research-only,
+non-commercial, or academic-use restrictions when you need broader rights, matching on keywords in
+the license and <strong>failing closed</strong> — when a license is ambiguous or unrecognized, the
+source is rejected, not admitted. A stricter or looser profile is allowed, but only as an explicit,
+recorded choice that becomes part of the snapshot. You never loosen the rules by accident.</p>
+
+<div class="note note--crit">
+  <div class="note__label">✗ Fail closed, and never infer rights from a code license</div>
+  <p>Two rules, both learned expensively. First: on any doubt about a license, <strong>reject</strong>.
+  A dataset that is missing a few uncertain sources is a minor inconvenience; a dataset built on
+  rights you did not have is a legal and ethical failure that can invalidate everything downstream
+  of it. Second, and easy to get wrong: <strong>never infer the rights to weights or assets from a
+  repository's code license.</strong> A permissively licensed codebase routinely ships model
+  weights or data under a completely different, far more restrictive term. Verify the exact license
+  for the exact artifact you are ingesting — the code license tells you nothing about the weights.
+  We return to this for model weights in <a href="06-detectors.html">Chapter&nbsp;6</a>.</p>
+</div>
+
+<h2><span class="secn">5.7</span> The manifest, and the layout trainers actually want</h2>
+
+<p>Every snapshot carries a <span class="term">manifest</span>: a single self-describing document
+that makes the snapshot fully auditable. It records the taxonomy (the exact class list), the split
+assignment for every sequence, the per-source provenance and license, the frame counts, and the
+content hash that names the whole thing. A reviewer who has never met you can open the manifest and
+trace any frame in the dataset back to its source, its license, and the build that produced it —
+without asking a human a single question. That is what "a dataset that doesn't lie" means in
+practice: not that you trust it, but that you do not have to.</p>
+
+<p>The immutable snapshot is the source of truth, but it is not the shape a training framework wants
+to read. Trainers expect a standard on-disk layout — most commonly
+<span class="term">COCO format</span>, a widely used convention for storing images alongside a JSON
+file of their annotations. So the dataset layer <strong>exports</strong> a snapshot to that layout
+on demand. The export is a derived, throwaway view; the snapshot behind it never changes, and two
+exports of the same snapshot are identical. Chapter&nbsp;6 picks the story up from the exported
+layout and starts training on it.</p>
+
+<div class="case">
+  <div class="case__head">
+    <h3>The validation score that was measuring memory</h3>
+    <span class="verdict verdict--crit">what broke</span>
+  </div>
+  <p>A team trained a detector and watched the validation accuracy climb to near-perfect. Everyone
+  celebrated — the numbers were the best anyone had seen, and a demo was scheduled. Then the model
+  met genuinely new footage, filmed on a different day from a different platform, and its performance
+  collapsed. The thing that scored 0.97 in the lab could barely find an aircraft in the wild.</p>
+  <p>The root cause was in the split, not the model. The data had been divided at the frame level:
+  frames were pooled and shuffled before splitting, so consecutive frames of the same clip landed in
+  both train and validation. The model was being validated on frames a pixel or two different from
+  ones it had trained on. The "validation" score was measuring how well the model memorized its
+  training clips — a question with an easy, useless answer — not whether it could generalize to a
+  clip it had never seen.</p>
+  <div class="stats">
+    <div class="stat"><span class="v">0.97</span><span class="l">"validation" (frame split, leaking)</span></div>
+    <div class="stat"><span class="v">↓↓</span><span class="l">real new footage</span></div>
+    <div class="stat"><span class="v">~0.6</span><span class="l">honest val (sequence split)</span></div>
+    <div class="stat"><span class="v">tracks</span><span class="l">real-world, for the first time</span></div>
+  </div>
+  <p>The fix was the whole of this chapter. They re-split by sequence so every frame of a clip stayed
+  on one side of the wall, and they added the cross-split content-hash guard to catch duplicates the
+  splitter couldn't see. The honest validation number dropped sharply — and that drop was the good
+  news. For the first time the lab number moved in step with real-world performance. The lesson they
+  carried out: a suspiciously good number is not a triumph to protect. It is a bug report to
+  investigate.</p>
+</div>
+
+<h2><span class="secn">5.8</span> The ground holds still</h2>
+
+<p>Nothing in this chapter was a model or a training trick. It was all about the ground — making the
+data underneath the model so stable, so frozen, so auditable that when a number moves you know it
+was the model that moved and not the earth beneath it. An immutable snapshot means "the same dataset"
+means the same thing forever. Sequence splitting and the duplicate guard mean the test set is a real
+test. The license gate means the dataset is yours to use. The manifest means anyone can check your
+work. Together they buy the one thing every later chapter spends: a number you are allowed to
+believe.</p>
+
+<div class="takeaways">
+  <span class="kicker">Takeaways</span>
+  <ul>
+    <li><b>A dataset is a frozen snapshot, not a folder.</b> Content-address it by a hash of its
+    contents. Same inputs rebuild to the same identifier; adding data makes a new snapshot and leaves
+    the old one untouched. Nothing is ever overwritten.</li>
+    <li><b>Split by sequence, never by frame.</b> Near-identical neighboring frames make frame-level
+    splitting leak the test set into training. Assign whole sequences atomically so every frame of a
+    clip shares one split.</li>
+    <li><b>Hash the identity, don't shuffle the list.</b> Assign each sequence's split from a hash of
+    its own ID, so adding sequences never silently migrates existing ones across the divide.</li>
+    <li><b>Guard and gate at build time.</b> Fail the build on a cross-split content-hash duplicate,
+    and fail closed on any source whose license is incompatible with your intended use.</li>
+    <li><b>A suspiciously good number is a bug report.</b> The manifest makes every snapshot
+    auditable; the honest number, even when it drops, is the one that tracks the real world.</li>
+  </ul>
+</div>

@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Preface — World2Vision</title>
+<meta name="description" content="A short orientation: what this is, what it is not, why it teaches through a single hard example, and why every failure was left on the…">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<div class="topbar">
+  <button class="topbar__burger" id="burger" aria-label="Open navigation">☰ Contents</button>
+  <span class="topbar__title">Preface</span>
+</div>
+<div class="scrim" id="scrim"></div>
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <a class="sidebar__brand" href="../index.html">
+      <span class="kicker">World<span aria-hidden="true">2</span>Vision</span>
+      <h1>Seeing the Sky</h1>
+    </a>
+    <p class="sidebar__tagline">Building perception systems that find small, fast objects in the air.</p>
+    <ol class="toc">
+    <li class="toc__part">Front matter</li>
+    <li><a class="active" href="00-preface.html"><span class="n">·</span><span>Preface — how to read this</span></a></li>
+    <li class="toc__part">I · The problem & the shape</li>
+    <li><a class="" href="01-the-problem.html"><span class="n">1</span><span>Seeing small things in a big sky</span></a></li>
+    <li><a class="" href="02-the-system.html"><span class="n">2</span><span>The shape of the system</span></a></li>
+    <li class="toc__part">II · Manufacturing truth</li>
+    <li><a class="" href="03-synthetic-worlds.html"><span class="n">3</span><span>Building worlds: synthetic data</span></a></li>
+    <li><a class="" href="04-labels-from-geometry.html"><span class="n">4</span><span>Truth from geometry: labeling</span></a></li>
+    <li><a class="" href="05-datasets.html"><span class="n">5</span><span>Datasets that don't lie</span></a></li>
+    <li class="toc__part">III · Learning to see</li>
+    <li><a class="" href="06-detectors.html"><span class="n">6</span><span>The detectors</span></a></li>
+    <li><a class="" href="07-sim-to-real.html"><span class="n">7</span><span>The sim-to-real gap</span></a></li>
+    <li><a class="" href="08-tiny-objects.html"><span class="n">8</span><span>Tiny objects and tiling</span></a></li>
+    <li class="toc__part">IV · Judgment & the loop</li>
+    <li><a class="" href="09-evaluation.html"><span class="n">9</span><span>Measuring what matters</span></a></li>
+    <li><a class="" href="10-deployment.html"><span class="n">10</span><span>Off the desktop: edge & export</span></a></li>
+    <li><a class="" href="11-closing-the-loop.html"><span class="n">11</span><span>Closing the loop</span></a></li>
+    </ol>
+  </aside>
+  <main class="content">
+    <div class="reading prose">
+<header class="chap-head">
+  <span class="num">Front matter · Preface</span>
+  <h1>How to read this book</h1>
+  <p class="lede">A short orientation: what this is, what it is not, why it teaches through a
+  single hard example, and why every failure was left on the page.</p>
+</header>
+
+<p>Most computer-vision tutorials hand you a folder of cat photos and a model that already
+works. You run three commands, watch an accuracy number climb, and learn almost nothing about
+why the number climbed or what you would do the day it doesn't. This book takes the opposite
+bet. It follows one genuinely hard problem — <strong>finding a small flying object from a
+moving camera</strong> — all the way from an empty directory to a model running on the vehicle,
+and it refuses to skip the parts where things break.</p>
+
+<p>The choice of example is deliberate. A drone two kilometers away is roughly twenty pixels
+tall. It moves against a background of cloud, terrain, and glare. Sometimes it is a bird.
+Sometimes the bird is the thing you care about and the drone is the distraction. The camera
+itself is moving, so the whole world slides across the frame. Nearly every difficulty that
+makes real computer vision hard — tiny objects, domain shift, class confusion, the tyranny of
+false alarms — is present in a single frame of this problem. Master it here and the rest of the
+field feels familiar.</p>
+
+<h2><span class="secn">§</span>The one idea to keep</h2>
+
+<p>If you remember nothing else, remember this: <strong>the pipeline is the product.</strong>
+Newcomers fixate on the model — which architecture, how many layers, whose pretrained weights.
+Practitioners learn that the model is the most swappable part of the whole system. What actually
+determines whether your detector works in the sky is everything <em>around</em> the model: where
+the data came from, whether the labels are correct, whether your test set is honest, whether the
+thing you measured on your laptop is the thing that matters on the aircraft. Ten of this book's
+twelve chapters are about that surrounding machinery, because that is where the real engineering,
+and the real failures, live.</p>
+
+<div class="note">
+  <div class="note__label">▸ How the chapters are shaped</div>
+  <p>Each chapter opens with the problem in plain language before any code appears, builds the
+  solution one decision at a time, and closes with a short list of takeaways you could repeat to
+  a colleague. Technical terms are set in <span class="term">bold with a dotted underline</span>
+  the first time they appear, and defined on the spot. You should never have to already know the
+  answer to understand the question.</p>
+</div>
+
+<h2><span class="secn">§</span>Why the failures stay in</h2>
+
+<p>Real systems are built by making mistakes and noticing them. A tutorial that shows only the
+clean path teaches you to recognize success but not to diagnose failure — and diagnosis is the
+job. So the war stories are here in full. You will read about a single flipped vector that
+mislabeled an entire synthetic dataset in a way that looked perfectly consistent until one
+absolute test caught it. You will read about a benchmark that reported a catastrophic 0.02 when
+the true number was 0.92, because the test set was a single pathological flight. These are not
+cautionary asides. They are the curriculum.</p>
+
+<div class="case case--crit">
+  <div class="case__head">
+    <h3>Reading a war story</h3>
+    <span class="verdict verdict--crit">what broke</span>
+  </div>
+  <p>Boxes like this one appear throughout the book. Each records something that actually went
+  wrong in a real build — the symptom, the root cause, and the fix — because the shape of a bug
+  teaches more than the shape of a feature. When you see the red bar, slow down: there is a
+  lesson in it that no amount of correct code would have taught.</p>
+</div>
+
+<h2><span class="secn">§</span>What you need to bring</h2>
+
+<p>You should be comfortable reading code — the examples are in Python, and you should not be
+frightened by a class definition or a command line. You do <em>not</em> need any machine
+learning, any computer graphics, or any knowledge of aircraft. Where the book needs a piece of
+math — a camera projection, an intersection-over-union, an average precision — it builds the
+idea from the ground up rather than citing it. The goal is that you finish able to build a
+system like this, not merely to admire one.</p>
+
+<h2><span class="secn">§</span>A word on the domain</h2>
+
+<p>The running example — a flying camera looking for other flying things — is a real and
+consequential problem. The same perception stack serves a delivery drone that must see and avoid
+crossing air traffic, an airport that must track birds near a runway, a research platform
+cataloguing wildlife, and the broad family of autonomous aerial vehicles, from hobbyist
+quadcopters to fast, uncrewed craft, that increasingly share the sky and must be able to notice
+one another. This book is about the <em>seeing</em>. What any particular system does after it
+sees is a separate question with its own hard constraints, and — as Chapter&nbsp;2 argues — one
+worth keeping firmly on the other side of a line you draw in the code itself.</p>
+
+<div class="takeaways">
+  <span class="kicker">Takeaways</span>
+  <ul>
+    <li><b>The pipeline is the product.</b> The model is the swappable part; the machinery around
+    it decides whether the system works.</li>
+    <li><b>One hard example beats ten easy ones.</b> Air-to-air detection concentrates most of
+    computer vision's real difficulties into a single frame.</li>
+    <li><b>Failures are the curriculum.</b> Every war story in this book happened, and each one
+    teaches something a success could not.</li>
+    <li><b>No prerequisites, no hand-waving.</b> Every term is defined where it appears; every
+    piece of math is built, not cited.</li>
+  </ul>
+</div>
+
+      <nav class="chapnav"><a class="next" href="01-the-problem.html"><span class="dir">Next ›</span><span class="ttl">Seeing Small Things in a Big Sky</span></a></nav>
+      <footer class="page-foot">
+        World2Vision · an open field guide to airborne-object perception ·
+        <a href="../index.html">home</a>
+      </footer>
+    </div>
+  </main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

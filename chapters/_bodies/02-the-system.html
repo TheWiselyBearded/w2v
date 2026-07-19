@@ -1,0 +1,231 @@
+<header class="chap-head">
+  <span class="num">Part I · Chapter 2</span>
+  <h1>The Shape of the System</h1>
+  <p class="lede">A perception system is built by many hands, from many sources, over many months.
+  What lets those pieces fit together is not a clever model but a small set of architectural
+  commitments made on day one. This chapter draws the skeleton that every later chapter hangs on.</p>
+</header>
+
+<p>In Chapter&nbsp;1 we cataloged what makes airborne detection hard. This chapter is about a
+different kind of hardness — not the difficulty of any single frame, but the difficulty of
+building a system that stays coherent as it grows. You will add a second simulator. You will
+ingest a public dataset with its own quirks. You will swap detectors, change resolutions, and
+run experiments on three different machines. If every one of those changes ripples through the
+whole codebase, the project collapses under its own weight long before the sky is ever
+photographed. The antidote is a handful of decisions that feel almost bureaucratic when you make
+them and turn out to be the difference between a system and a pile of scripts.</p>
+
+<h2><span class="secn">2.1</span> One record to rule them all</h2>
+
+<p>Here is the first and most important commitment. Data will enter this system from wildly
+different places — a Unity simulator, an NVIDIA Omniverse renderer, a public dataset, footage
+you captured yourself. Each of those speaks its own native dialect: different file formats,
+different coordinate conventions, different ideas of what a "label" even is. If the training code
+has to understand all of those dialects, it becomes a tangle that breaks every time a new source
+arrives.</p>
+
+<p>So we forbid that. We define <strong>one canonical record format</strong> — a single, precise
+description of what a frame and its labels look like inside our system — and we require that every
+source be translated into it at the door. The translators are called <span class="term">source
+adapters</span>: small, source-specific pieces of code whose only job is to turn one dialect into
+the canonical one. Everything past the adapter — every trainer, evaluator, visualizer — reads
+only the canonical format and never learns that Unity or Omniverse or any particular dataset
+exists.</p>
+
+<div class="figure">
+<pre>
+   Unity ──┐
+ Omniverse ─┤
+   Unreal ──┤──►  source adapters  ──►  ONE canonical record  ──►  everything downstream
+  public   ─┤        (translate)        FrameRecord + labels        (never sees the source)
+  captured ─┘
+</pre>
+<figcaption><b>The narrow waist.</b> Many sources on the left, many consumers on the right, and a
+single record format at the pinch point. Add a source by writing one adapter; add a consumer by
+reading one format. Neither side ever has to know about the other.</figcaption>
+</div>
+
+<p>What is in the record? Enough to describe a frame completely and unambiguously: the image
+itself, a timestamp, the camera's parameters, and for every object a box, a class, a stable
+identity, and a measure of how visible it is. Concretely, a single object's annotation looks
+something like this:</p>
+
+<p class="code-label">canonical object annotation (one object in one frame)</p>
+<pre><code>{
+  "object_id": "a4f1e2c8-…",     // stable across the whole sequence
+  "class": "aircraft",           // from a fixed, documented taxonomy
+  "bbox_xywh": [1204, 880, 22, 17],   // pixel box: x, y, width, height
+  "visible_fraction": 0.86,      // 1.0 = fully in view, 0.0 = fully hidden
+  "distance_m": 2140.0           // optional, when the source knows it
+}</code></pre>
+
+<p>The details matter less than the discipline. The box is in pixels with an agreed-upon origin.
+The class comes from a taxonomy written down in one place. The <code>object_id</code> is the same
+number every frame the object appears in — that is what makes the data <em>sequence-aware</em>,
+the property Chapter&nbsp;1 said we could not live without. And <code>visible_fraction</code>
+records occlusion, so that later a training pipeline can decide whether a mostly-hidden object
+should count. Every field is there because some downstream consumer needs it, and every consumer
+can rely on it being there.</p>
+
+<div class="note">
+  <div class="note__label">▸ Why a "boring" format is a feature</div>
+  <p>The canonical record is deliberately dull — no cleverness, no source-specific escape hatches.
+  That dullness is the point. A format with special cases is a format that every consumer must
+  handle special cases for. The narrow waist only works if it is genuinely narrow: one shape,
+  no exceptions. When a new source has data that does not fit, you extend the format for
+  everyone, on purpose, rather than smuggling it through for one consumer.</p>
+</div>
+
+<h2><span class="secn">2.2</span> Make it impossible to lie: schemas as contracts</h2>
+
+<p>Declaring a format is not enough. Nothing stops a careless adapter from emitting a box with
+negative width, a class that isn't in the taxonomy, or a stray field that a consumer will
+silently ignore until it causes a subtle bug three months later. So we make the record a
+<span class="term">schema-validated contract</span>: a machine-checked definition that rejects any
+record that doesn't conform, at the moment it is created.</p>
+
+<p>In Python this is naturally expressed with a data-validation library — the examples in this
+book use <a href="https://docs.pydantic.dev/">Pydantic</a> — configured to <strong>forbid unknown
+fields</strong>. That last part sounds pedantic and is quietly essential. If an adapter misspells
+<code>bbox_xywh</code> as <code>bbox_xyxy</code>, a permissive system accepts the record, drops the
+misspelled field, and trains on garbage. A strict system refuses the record and tells you exactly
+where. The rule is worth stating plainly:</p>
+
+<blockquote>Validate at the boundary, fail loudly, and never let a malformed record travel one
+step deeper into the system than the point where it was created.</blockquote>
+
+<p>This is the same instinct that makes the whole architecture work, applied at the level of a
+single object: decide what is allowed, encode that decision in something the machine enforces,
+and let violations announce themselves instead of hiding.</p>
+
+<h2><span class="secn">2.3</span> The loop, plane by plane</h2>
+
+<p>With the record settled, we can draw the system. It has two halves that behave very differently
+and should never be confused.</p>
+
+<p>The <span class="term">offline plane</span> is where the slow, expensive, iterative work
+happens: ingesting data, building datasets, training models, evaluating them, and deciding which
+one is good enough to ship. It runs on your workstation and your GPU cluster. It has all the time
+in the world and none of the constraints of a real vehicle. This is where almost all of this book
+lives.</p>
+
+<p>The <span class="term">runtime plane</span> is the opposite: the model actually running on the
+aircraft, taking a frame and returning detections, under hard limits on latency, memory, and
+power. It is deliberately simple — it does one thing fast — and Chapter&nbsp;10 is devoted to
+getting a model that was born in the luxurious offline plane to survive in the austere runtime
+one.</p>
+
+<div class="figure">
+<pre>
+  OFFLINE PLANE  (workstation + GPU, all the time in the world)
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │  ingest → build dataset → train → evaluate → analyze failures →       │
+  │     ▲                                                       │          │
+  │     └──────────── curation loop: make more of what breaks ─┘          │
+  │                              │ promote the winner                     │
+  └──────────────────────────────┼───────────────────────────────────────┘
+                                  │  export · quantize
+                                  ▼
+  RUNTIME PLANE  (on the vehicle, milliseconds and milliwatts)
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │        frame → preprocess → detector → tracker → detections → log      │
+  └──────────────────────────────────────────────────────────────────────┘
+</pre>
+<figcaption><b>Two planes, one boundary.</b> The offline plane is a loop that improves the model;
+the runtime plane is a straight line that uses it. Everything crosses from one to the other through
+a single, well-defined export step — the subject of Chapter&nbsp;10.</figcaption>
+</div>
+
+<h2><span class="secn">2.4</span> Immutable lineage: nothing is ever overwritten</h2>
+
+<p>A perception system is a machine for making claims: <em>this model scores this well on this
+data.</em> A claim you cannot reproduce is worthless, and reproducibility is impossible if the
+things you name keep changing underneath you. So the third commitment is <span class="term">immutable
+lineage</span>: every artifact — a dataset, a model, an evaluation report — is frozen once created
+and identified by content, not by a name that could be reused.</p>
+
+<p>In practice this means a dataset is not a folder you keep adding files to; it is a
+<strong>content-addressed snapshot</strong> — a specific, hashed collection of frames whose
+identity is derived from exactly what is in it. Build it twice from the same inputs and you get the
+same identifier. Add one sequence and you get a new snapshot with a new identifier, while the old
+one still exists, unchanged, ready to reproduce yesterday's result. The same discipline applies to
+models and reports. Nothing is overwritten; everything is versioned; every number in the system can
+be traced back to the exact data and code that produced it. Chapter&nbsp;5 builds this machinery in
+detail, because getting it right is what separates a result you can trust from a result you merely
+remember.</p>
+
+<h2><span class="secn">2.5</span> Gates: earning the right to ship</h2>
+
+<p>How does a model get promoted from "just trained" to "ready for the vehicle"? Not by a human
+glancing at a number and nodding. It happens by passing a set of <span class="term">promotion
+gates</span> — automated checks, each guarding one specific way a model can be secretly bad.</p>
+
+<p>A candidate is blocked unless it clears every gate: the data has no leakage between what it
+trained on and what it was tested on; it performs well enough on a real-world holdout, not just on
+synthetic data; it catches small objects specifically, not just large ones on average; its
+false-alarm rate is acceptable; the exported version behaves identically to the one you trained;
+it fits in memory and meets latency on the target device; and every piece of it has a clean license
+and complete provenance. Crucially, the <em>thresholds</em> those gates enforce are configuration,
+not constants buried in code — because the right false-alarm rate for a wildlife survey is not the
+right one for collision avoidance, and the system should make that a knob, not a rewrite.</p>
+
+<div class="note note--good">
+  <div class="note__label">✓ Gates encode judgment as code</div>
+  <p>Every gate is a lesson someone learned the hard way, frozen so no one has to learn it twice.
+  The leakage gate exists because someone once shipped a model that "worked" only because its test
+  set had leaked into training. The real-holdout gate exists because someone was fooled by
+  brilliant synthetic scores that evaporated on real footage. A gate is institutional memory made
+  executable.</p>
+</div>
+
+<h2><span class="secn">2.6</span> The safety boundary is a data-structure decision</h2>
+
+<p>One commitment in this system is different in kind from the others, and it belongs in the
+architecture rather than in a policy document. This book builds a system that <strong>perceives</strong>
+— it turns images into detections, classifications, tracks, and honest measures of confidence — and
+it stops there. It does not decide what to do about what it sees.</p>
+
+<p>The clean way to guarantee that is not a promise in a README; it is the shape of the canonical
+record itself. The output contract has fields for boxes, classes, identities, confidences, and
+quality estimates. It has <em>no</em> fields for anything an actor downstream would need to act:
+no guidance, no engagement, no actuation, no control. Because unknown fields are forbidden
+(§2.2), such a field cannot be quietly added; adding one is a visible, deliberate change to a
+schema that the whole system validates against. The boundary between seeing and acting is
+therefore not a matter of good intentions — it is a property the code enforces on every record,
+every time.</p>
+
+<p>Keeping perception downstream-agnostic is also good engineering. A perception layer that emits
+clean, well-specified detections can serve a sense-and-avoid function on a delivery drone, a
+counting task at a wildlife refuge, or an offline analysis of recorded flights, without change.
+The narrow waist that made the <em>inputs</em> manageable makes the <em>outputs</em> reusable, and
+the same discipline that keeps the system coherent keeps it honest about what it is for.</p>
+
+<h2><span class="secn">2.7</span> What we have committed to</h2>
+
+<p>Nothing in this chapter was a model, an algorithm, or a clever trick. Every commitment was
+structural — a decision about how information is shaped and moved. And yet these are the decisions
+that determine whether everything downstream is buildable. A canonical record makes new sources
+cheap. Schema contracts make bad data loud. Two planes separate the slow work from the fast. Immutable
+lineage makes results reproducible. Gates make promotion earned. And a typed output contract makes
+the safety boundary real.</p>
+
+<p>This is the pipeline, in outline. The rest of the book fills it in, one stage at a time, starting
+with the stage that solves the data-scarcity problem from Chapter&nbsp;1: if the real world will not
+give us enough labeled skies, we will build our own. That is Part II, and it begins with a
+simulator.</p>
+
+<div class="takeaways">
+  <span class="kicker">Takeaways</span>
+  <ul>
+    <li><b>One canonical record, many adapters.</b> Translate every source into a single format at
+    the door; nothing downstream ever sees the source.</li>
+    <li><b>Schemas are contracts.</b> Validate at the boundary, forbid unknown fields, and fail
+    loudly — a malformed record must never travel deeper than where it was born.</li>
+    <li><b>Two planes.</b> The offline plane is a loop that improves the model; the runtime plane
+    is a line that uses it. One export step connects them.</li>
+    <li><b>Immutable lineage and promotion gates</b> make results reproducible and shipping earned,
+    not asserted.</li>
+    <li><b>The safety boundary lives in the schema.</b> No actuation fields exist to fill, and
+    forbidding unknown fields means none can be added by accident.</li>
+  </ul>
+</div>

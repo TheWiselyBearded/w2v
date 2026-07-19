@@ -1,0 +1,289 @@
+<header class="chap-head">
+  <span class="num">Part III · Chapter 6</span>
+  <h1>The Detectors <em>— the swappable part.</em></h1>
+  <p class="lede">This is the first chapter about the model itself, and its main job is to
+  convince you that the model matters less than you think. There are two great families of object
+  detector, you almost never train either from scratch, and the biggest lever on accuracy is not
+  the architecture at all — it is the data. The detector is a component you slot into the pipeline,
+  not the pipeline itself.</p>
+</header>
+
+<p>Five chapters in, we have built a system that can manufacture labeled skies, translate every
+source into one canonical record, and freeze datasets into reproducible snapshots. We have not
+yet trained a single model. That ordering was deliberate. The recurring thesis of this book —
+<em>the pipeline is the product</em> — is easiest to believe once you see how interchangeable the
+detector really is. In this chapter we plug one in, look honestly at what changes when we swap it
+for another, and discover that the answer is: less than the marketing would have you expect.</p>
+
+<h2><span class="secn">6.1</span> What an object detector actually does</h2>
+
+<p>Strip away the vocabulary and a detector is a function with a very simple signature. It takes
+one image and returns a set of guesses. <span class="term">Object detection</span> is the task of
+finding every object of interest in an image and, for each one, producing three things: a
+<span class="term">bounding box</span> (the rectangle in pixel coordinates that tightly encloses
+the object), a <span class="term">class</span> (which category it belongs to, drawn from your fixed
+taxonomy — "aircraft", "bird", "drone", or simply "object"), and a
+<span class="term">confidence</span>, sometimes called the score (a number from 0 to 1 saying how
+sure the model is that this box contains a real object of that class). That is the entire output:
+a list of <code>(box, class, confidence)</code> triples, and nothing more. It matches the
+detection fields of the canonical record from <a href="02-the-system.html">Chapter&nbsp;2</a>
+exactly — by design, because the detector's output <em>is</em> a canonical record.</p>
+
+<p>Every detector ever built produces that same list. What differs — wildly — is how it arrives at
+it. There are two dominant strategies, and understanding the split is enough to make sense of the
+entire zoo of model names you will encounter.</p>
+
+<h2><span class="secn">6.2</span> Family one: tile the image and vote (anchor / grid)</h2>
+
+<p>The first family thinks spatially. Imagine laying a grid over the image and, at every cell,
+asking a fixed menu of questions: <em>is there an object centered near here? If so, how much bigger
+or smaller than this reference box is it, and what class is it?</em> The reference boxes are called
+<span class="term">anchors</span> — candidate box shapes and scales tiled densely across the image;
+newer "anchor-free" variants drop the hand-drawn shapes and predict directly from grid points, but
+the spirit is the same. The model looks everywhere at once and emits a prediction for every tile.</p>
+
+<p>This produces a flood of overlapping boxes — a single object lights up several neighboring
+cells. To clean it up, the family uses <span class="term">Non-Maximum Suppression</span> (NMS): a
+post-processing step that walks the boxes from highest confidence down, keeps each one, and deletes
+any lower-scoring box that overlaps it too much. One object, one surviving box. This lineage is the
+YOLO family (You Only Look Once); a clean, permissively licensed representative is
+<strong>YOLOX</strong>. Its defining virtues are speed and predictability. It is the iteration
+workhorse — the detector you reach for when you want to run an experiment before lunch and read the
+result after.</p>
+
+<div class="figure">
+<pre>
+  ANCHOR / GRID  (look everywhere, then suppress)      QUERY-BASED  (ask N times)
+  ┌───────────────────────────────┐                    ┌───────────────────────────────┐
+  │ ┌─┬─┬─┬─┬─┬─┬─┬─┐  tile every  │                    │  query 1 ─► "object? where?"  │
+  │ ├─┼─┼─┼─┼─┼─┼─┼─┤  cell with   │                    │  query 2 ─► "object? where?"  │
+  │ ├─┼─┼─▓─┼─┼─┼─┼─┤  anchors;    │                    │    ⋮                          │
+  │ ├─┼─┼─▓─┼─┼─┼─┼─┤  predict all │                    │  query N ─► "object? where?"  │
+  │ ├─┼─┼─┼─┼─┼─┼─┼─┤  then NMS to │                    │                               │
+  │ └─┴─┴─┴─┴─┴─┴─┴─┘  dedupe      │                    │  set prediction, no NMS       │
+  └───────────────────────────────┘                    └───────────────────────────────┘
+       many boxes ─► suppress ─► few                         N answers ─► match ─► few
+</pre>
+<figcaption><b>Two ways to find the same objects.</b> The grid detector predicts densely and then
+throws most of it away with NMS. The query detector asks a fixed number of learned questions and
+matches each real object to exactly one answer — no dense tiling, no suppression step.</figcaption>
+</div>
+
+<h2><span class="secn">6.3</span> Family two: a fixed set of questions (query-based / DETR)</h2>
+
+<p>The second family thinks differently. Instead of tiling space, it carries a fixed set of
+<span class="term">object queries</span> — say 300 learned "slots," each of which independently asks
+"is there an object, and if so, where and what?" This is the <span class="term">DETR</span>
+architecture (DEtection TRansformer); a permissively licensed representative is
+<strong>RF-DETR</strong>. The queries are not tied to grid positions; they are learned probes that
+attend over the whole image.</p>
+
+<p>The elegant part is how it is trained. DETR does <span class="term">set prediction</span> — it
+outputs a set of boxes all at once and is scored on the set as a whole. During training, each
+ground-truth object is assigned to exactly one query using <span class="term">bipartite
+matching</span> (the Hungarian matching algorithm finds the one-to-one pairing of predictions to
+truths that minimizes total error). Because every real object is matched to precisely one query,
+there are no duplicate boxes to remove — <strong>DETR needs no anchors and no NMS at all</strong>.
+The suppression step that the grid family cannot live without simply does not exist here. The price
+is training cost: query models are heavier and slower to train, and they typically need more data
+and more epochs before they come good. The reward is accuracy — when they converge, they tend to
+edge out the grid family, especially on cluttered scenes.</p>
+
+<table>
+  <thead>
+    <tr><th>Property</th><th>Anchor / grid (YOLOX)</th><th>Query-based (RF-DETR)</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Candidate boxes</td><td>dense anchors / grid points</td><td>N learned queries (e.g. 300)</td></tr>
+    <tr><td>Duplicate removal</td><td>NMS required</td><td>none — set prediction</td></tr>
+    <tr><td>Hand-designed priors</td><td>anchor shapes/scales</td><td>none</td></tr>
+    <tr><td>Training cost</td><td>lower, converges fast</td><td>higher, data-hungry</td></tr>
+    <tr><td>Typical accuracy</td><td>strong</td><td>often a touch higher</td></tr>
+    <tr><td>Iteration speed</td><td>very fast (many epochs/hour)</td><td>slower per epoch</td></tr>
+  </tbody>
+</table>
+
+<div class="note note--warn">
+  <div class="note__label">⚠ Retire cardinality as a quality signal for DETR</div>
+  <p>A DETR model always emits its full complement of predictions — 300 boxes, most of them the
+  model's way of saying "nothing here." A tempting but broken metric is <strong>cardinality</strong>:
+  compare how many objects the model predicted against how many exist. Because the raw prediction
+  count is structurally pinned near the query count no matter what is in the frame, this number tells
+  you almost nothing about quality — a perfect model and a useless one can post identical cardinality.
+  Do not use it. Judge the model with precision, recall, and F1 measured at swept confidence
+  thresholds, which we build in <a href="09-evaluation.html">Chapter&nbsp;9</a>.</p>
+</div>
+
+<h2><span class="secn">6.4</span> You do not start from scratch: transfer learning</h2>
+
+<p>Here is a fact that surprises newcomers and quietly defines the economics of the whole field:
+you almost never train a detector from nothing. Instead you practice <span class="term">transfer
+learning</span> — you take a model that already learned to see on a large, general dataset and
+adapt it to your problem. The reusable core is the <span class="term">backbone</span>: the stack of
+early layers that turn raw pixels into general visual features like edges, corners, and textures.
+That backbone arrives as <span class="term">pretrained weights</span> — numbers already trained,
+typically on a big public dataset such as COCO, so the model starts knowing how to look at images in
+general. You then perform <span class="term">fine-tuning</span>: continuing training on your own,
+much smaller dataset so the model re-specializes to your objects and your domain.</p>
+
+<p>Why does this work? Because the low-level features are almost universal. The filters that detect
+an edge against the sky are the same filters that detect an edge against a street; a network does
+not need to relearn what a gradient is just because the subject changed. Most of what fine-tuning
+teaches is concentrated in the head — the final layers that decide "this feature pattern means
+aircraft." You are not rebuilding vision; you are re-teaching the last mile. This is why a few
+thousand well-chosen frames can produce a usable detector, and it is the bridge that makes the
+synthetic-data strategy of Part II economically sane.</p>
+
+<h2><span class="secn">6.5</span> Licensing is an engineering gate, not a footnote</h2>
+
+<p>Transfer learning means you are shipping other people's numbers, and that makes licensing a
+first-class engineering concern rather than a legal afterthought. The single most important thing to
+internalize is that three separate licenses are in play and <strong>they are not the same
+license</strong>: the license on the <em>code</em>, the license on the <em>pretrained weights</em>,
+and the license on the <em>training data</em> those weights were derived from.</p>
+
+<p>The traps are real and specific. Some detector families release small model sizes under a
+permissive license such as Apache-2.0 but place their larger, higher-accuracy variants under a
+restrictive or commercial license — so the exact checkpoint you download changes your rights. Some
+of the most popular YOLO implementations ship under GPL/AGPL terms that require explicit
+organizational clearance for many deployment scenarios. And pretrained weights routinely carry terms
+the code repository does not, because the weights inherit obligations from the data they were trained
+on. You cannot infer any of this from the repo's headline license.</p>
+
+<div class="note note--crit">
+  <div class="note__label">✗ The rule</div>
+  <p>Verify the exact license for the <em>exact code</em>, the <em>exact weights file</em>, and the
+  <em>training data</em> you actually use — every one, separately. Never infer weight rights from a
+  repository's code license. Then encode <strong>"weights license approved"</strong> as a promotion
+  gate, exactly like the fail-closed license gate on datasets in
+  <a href="05-datasets.html">Chapter&nbsp;5</a>. A model whose weights have not cleared review does
+  not get promoted, no matter how well it scores. The gate fails closed: unknown provenance is
+  treated as forbidden until proven otherwise.</p>
+</div>
+
+<h2><span class="secn">6.6</span> Feeding the trainer: export, track, and name the job</h2>
+
+<p>Training frameworks do not read our canonical record directly; they expect a standard on-disk
+layout — a COCO-format JSON of annotations beside <code>train/</code>, <code>valid/</code>, and
+<code>test/</code> image folders. So the first step of any training run is to
+<strong>deterministically export</strong> an immutable dataset snapshot (Chapter&nbsp;5) into that
+layout. Deterministic matters: the same snapshot must always produce byte-identical folders, or
+reproducibility dies at the first step.</p>
+
+<p>Every run is then recorded by an <strong>experiment tracker</strong> — the examples in this book
+use <a href="https://mlflow.org/">MLflow</a> — which captures the config, the metrics over time, and
+the output artifacts, so any two runs can be compared honestly instead of from memory. And every
+training job is given a reproducible identity: a name plus a
+<code>config_hash(experiment + detector + dataset id)</code>. Re-submitting the same identity does
+not silently spawn a new thing; it creates <em>attempt N</em> under the same job. Reproducibility
+becomes a hashable property you can point at.</p>
+
+<div class="note">
+  <div class="note__label">▸ Epochs and config are part of the hash</div>
+  <p>The hash includes the training configuration — epoch count, learning rate, augmentation
+  settings, everything. Change the epochs and you have not resumed the old job; you have defined a
+  <em>new</em> job with a new identity. This is a feature: it means "the same job" always means the
+  same recipe, so two attempts under one job differ only by the luck of the hardware, never by a
+  quietly edited knob.</p>
+</div>
+
+<h2><span class="secn">6.7</span> Reproducibility is genuinely hard — a war story</h2>
+
+<p>You would hope that two attempts of the same hashed job produce the same model. They do not,
+quite, and pretending otherwise will burn you. The culprit is nondeterministic GPU kernels: some
+fast CUDA/cuDNN operations accumulate results in a nondeterministic order, so identical code on
+identical data drifts apart run to run.</p>
+
+<div class="case">
+  <div class="case__head">
+    <h3>The last-step weights that lied</h3>
+    <span class="verdict verdict--warn">compare the checkpoint you ship, not the last step</span>
+  </div>
+  <p>In one build, a team ran the same job twice and compared the models by their
+  <strong>raw final-step weights</strong> — the parameters at the literal last training iteration —
+  on a small validation set. The two attempts disagreed violently: one posted an mAP near
+  <strong>0.22</strong>, the other near <strong>0.90</strong>, from the same recipe. Panic. Was the
+  pipeline broken?</p>
+  <p>It was not. The raw last-step weights are the noisiest thing in the whole system — a single
+  unlucky final batch can throw them anywhere. But nobody ships the last-step weights. What you
+  actually promote is the <span class="term">EMA</span> checkpoint (exponential moving average — a
+  smoothed running average of the weights across training that filters out per-step jitter). Compared
+  on the EMA weights, the same two attempts were stable and close: about <strong>0.64</strong> and
+  <strong>0.74</strong>. The disagreement lived entirely in the noisy artifact nobody uses.</p>
+  <div class="stats">
+    <div class="stat"><span class="v">0.22 / 0.90</span><span class="l">raw last-step mAP, two attempts</span></div>
+    <div class="stat"><span class="v">0.64 / 0.74</span><span class="l">EMA mAP, same two attempts</span></div>
+    <div class="stat"><span class="v">1 job</span><span class="l">identical config hash</span></div>
+    <div class="stat"><span class="v">tiny val</span><span class="l">quantized, noise-amplifying</span></div>
+  </div>
+</div>
+
+<p>Three lessons came out of it, and all three are now standing policy. First, <strong>compare the
+checkpoint you will actually ship</strong> — the EMA or best-by-metric weights — never the raw
+last step. Second, <strong>pin deterministic GPU settings</strong> (the cuDNN deterministic flags)
+to shrink run-to-run drift wherever the speed cost is affordable. Third, <strong>a tiny validation
+set makes every metric quantized and jumpy</strong>: when there are only a handful of objects, one
+box flipping right or wrong swings the whole number. Grow the validation set — a theme we return to
+in <a href="09-evaluation.html">Chapter&nbsp;9</a>.</p>
+
+<h2><span class="secn">6.8</span> The architecture verdict: data dominates</h2>
+
+<p>So which family wins? The honest answer is the one that vindicates the whole book. At small data
+scale the two architectures can look far apart, and it is tempting to declare a champion. But as the
+data grows and diversifies, they converge.</p>
+
+<table>
+  <thead>
+    <tr><th>Data scale</th><th>Query-based (RF-DETR) AP@50</th><th>Anchor/grid (YOLOX) AP@50</th><th>Gap</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Pilot (small)</td><td class="tnum">wide lead</td><td class="tnum">well behind</td><td>large</td></tr>
+    <tr><td>Full scale</td><td class="tnum">0.857</td><td class="tnum">0.841</td><td>~0.016 — nearly tied</td></tr>
+  </tbody>
+</table>
+
+<p>At pilot scale the DETR model led by a wide margin. At full data scale the same two architectures
+finished at roughly <strong>0.857</strong> and <strong>0.841</strong> AP@50 — a rounding error apart.
+The early gap was not really a fact about the architectures; it was a fact about how much data each
+needed to reach its own ceiling. Give both enough, and the ceilings are almost the same height.</p>
+
+<p>That converts the choice into a practical one about your workflow, not a search for the "best"
+model. Pick an <strong>RF-DETR-style query model</strong> when you want peak accuracy and can afford
+the training bill. Pick a <strong>YOLOX-style grid model</strong> when you want to iterate fast — it
+can run several times more epochs per hour, and in a data-centric loop the team that iterates faster
+usually wins. Either way, the biggest lever on your accuracy is not on this page. It is the data:
+its scale, its diversity, and how faithfully it matches the real sky. That is precisely why Parts II
+and IV — building better data and closing the loop on failures — dominate this book, and this
+chapter is comparatively short.</p>
+
+<blockquote>The detector is the most swappable component in the system. Choose it for how it fits
+your iteration loop, not for a leaderboard — the data decides the ceiling.</blockquote>
+
+<h2><span class="secn">6.9</span> One more swappable piece: the tracker</h2>
+
+<p>A detector sees each frame in isolation. Turning a stream of per-frame boxes into stable object
+identities over time is the job of a <em>tracker</em>, and it too is a plugin behind a common
+interface, not a fixed part of the model. Start with a deterministic motion-and-association tracker
+— predict where each box should go and match it to the nearest new detection — and add appearance
+embeddings only if a benchmark proves you need them. The full treatment waits for
+<a href="11-closing-the-loop.html">Chapter&nbsp;11</a>; for now, note only that the same discipline
+applies: keep it swappable, and let evidence, not fashion, decide when to make it fancier.</p>
+
+<div class="takeaways">
+  <span class="kicker">Takeaways</span>
+  <ul>
+    <li><b>A detector is a simple function.</b> Image in, a list of <code>(box, class, confidence)</code>
+    out — which is exactly the canonical detection record. Everything else is implementation.</li>
+    <li><b>Two families, one output.</b> Grid detectors (YOLOX) tile densely and dedupe with NMS —
+    fast and predictable; query detectors (RF-DETR) do set prediction with bipartite matching — no
+    NMS, more accurate, heavier to train.</li>
+    <li><b>Transfer learning is the default.</b> Start from a pretrained backbone and fine-tune;
+    you re-teach the head your objects, you do not rebuild vision.</li>
+    <li><b>Licensing is a promotion gate.</b> Code, weights, and data carry separate licenses —
+    verify all three for the exact artifacts, fail closed, and never infer weight rights from code.</li>
+    <li><b>Reproducibility is hard; compare the EMA checkpoint you ship, not the noisy last step,</b>
+    pin deterministic GPU settings, and grow tiny validation sets.</li>
+    <li><b>Data dominates architecture.</b> Two models converge as data scales (0.857 vs 0.841 at
+    full scale) — so the detector is swappable, and the data is the product.</li>
+  </ul>
+</div>

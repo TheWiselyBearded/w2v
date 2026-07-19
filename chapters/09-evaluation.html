@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Measuring What Matters — World2Vision</title>
+<meta name="description" content="Every chapter so far has pointed here. A perception system is a machine for making claims, and a claim is only as trustworthy as the ruler you measured it with. This chapter…">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<div class="topbar">
+  <button class="topbar__burger" id="burger" aria-label="Open navigation">☰ Contents</button>
+  <span class="topbar__title">Measuring What Matters</span>
+</div>
+<div class="scrim" id="scrim"></div>
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <a class="sidebar__brand" href="../index.html">
+      <span class="kicker">World<span aria-hidden="true">2</span>Vision</span>
+      <h1>Seeing the Sky</h1>
+    </a>
+    <p class="sidebar__tagline">Building perception systems that find small, fast objects in the air.</p>
+    <ol class="toc">
+    <li class="toc__part">Front matter</li>
+    <li><a class="" href="00-preface.html"><span class="n">·</span><span>Preface — how to read this</span></a></li>
+    <li class="toc__part">I · The problem & the shape</li>
+    <li><a class="" href="01-the-problem.html"><span class="n">1</span><span>Seeing small things in a big sky</span></a></li>
+    <li><a class="" href="02-the-system.html"><span class="n">2</span><span>The shape of the system</span></a></li>
+    <li class="toc__part">II · Manufacturing truth</li>
+    <li><a class="" href="03-synthetic-worlds.html"><span class="n">3</span><span>Building worlds: synthetic data</span></a></li>
+    <li><a class="" href="04-labels-from-geometry.html"><span class="n">4</span><span>Truth from geometry: labeling</span></a></li>
+    <li><a class="" href="05-datasets.html"><span class="n">5</span><span>Datasets that don't lie</span></a></li>
+    <li class="toc__part">III · Learning to see</li>
+    <li><a class="" href="06-detectors.html"><span class="n">6</span><span>The detectors</span></a></li>
+    <li><a class="" href="07-sim-to-real.html"><span class="n">7</span><span>The sim-to-real gap</span></a></li>
+    <li><a class="" href="08-tiny-objects.html"><span class="n">8</span><span>Tiny objects and tiling</span></a></li>
+    <li class="toc__part">IV · Judgment & the loop</li>
+    <li><a class="active" href="09-evaluation.html"><span class="n">9</span><span>Measuring what matters</span></a></li>
+    <li><a class="" href="10-deployment.html"><span class="n">10</span><span>Off the desktop: edge & export</span></a></li>
+    <li><a class="" href="11-closing-the-loop.html"><span class="n">11</span><span>Closing the loop</span></a></li>
+    </ol>
+  </aside>
+  <main class="content">
+    <div class="reading prose">
+<header class="chap-head">
+  <span class="num">Part IV · Chapter 9</span>
+  <h1>Measuring What Matters <em>— why the average is the most dangerous number in the building.</em></h1>
+  <p class="lede">Every chapter so far has pointed here. A perception system is a machine for making
+  claims, and a claim is only as trustworthy as the ruler you measured it with. This chapter builds
+  the rulers from scratch — and then shows you all the ways a single headline number lies by
+  omission.</p>
+</header>
+
+<p>You have built worlds (Part II), earned back their realism (Part III), and taught a detector to
+survive twenty-pixel objects by tiling the frame (Chapter&nbsp;8). Now someone asks the question
+that decides whether any of it shipped: <em>is it good?</em> There is a strong temptation to answer
+with one number. Resist it. A single aggregate score is not a measurement of your system; it is a
+summary of a summary, and the two most important facts about your detector — where it fails and how
+often it invents ghosts — are exactly the facts an average is built to hide.</p>
+
+<p>This chapter is a discipline, not a formula. We will define the standard metrics honestly, then
+spend the rest of the chapter learning to distrust them: to slice them, to report them at the
+operating point you will actually deploy, and to freeze the ruler so that a number today means the
+same thing as a number six months from now. The thesis of the book — <strong>the pipeline is the
+product</strong> — applies to measurement most of all. The evaluator is a component you build, test,
+and version like any other, because a system that cannot honestly measure itself cannot be improved.</p>
+
+<h2><span class="secn">9.1</span> The atom of a match: IoU</h2>
+
+<p>Before you can say whether a detection is right, you need a rule for when a predicted box and a
+real box are "the same object." That rule is <span class="term">Intersection over Union</span>
+(IoU): the area where the two boxes overlap, divided by the total area they jointly cover. It is a
+number between 0 (no overlap) and 1 (a perfect box on top of the truth).</p>
+
+<div class="figure">
+<pre>
+   predicted box  ┌───────────┐
+                  │           │            overlap area   =  ▓▓▓
+                  │     ┌─────┼─────┐       union  area   =  everything shaded
+                  │     │▓▓▓▓▓│     │
+                  └─────┼─────┘     │              area(overlap)
+     ground-truth box   │           │      IoU =  ───────────────
+                        └───────────┘               area(union)
+
+        IoU = 1.0  perfect        IoU = 0.5  loose but usually "a match"
+        IoU = 0.0  disjoint       threshold @50 means: count it if IoU >= 0.50
+</pre>
+<figcaption><b>One rule, arbitrated by area.</b> A detection counts as a true positive only when its
+IoU with a ground-truth box clears a threshold. We write that threshold in shorthand: <code>@50</code>
+means IoU&nbsp;&ge;&nbsp;0.50, <code>@75</code> means &ge;&nbsp;0.75. The stricter the threshold, the
+tighter your boxes must be to earn credit.</figcaption>
+</div>
+
+<p>IoU is the atom every higher metric is built from. Change the threshold and you change what
+"correct" means: a detector that reliably finds objects but boxes them a few pixels loose looks great
+<code>@50</code> and mediocre <code>@75</code>. For twenty-pixel targets this matters enormously,
+because a two-pixel error is a large fraction of a small box — the same localization slop that is
+trivial on a pedestrian can drop a distant aircraft below threshold entirely.</p>
+
+<h2><span class="secn">9.2</span> The two ways to be wrong: precision and recall</h2>
+
+<p>With a matching rule in hand, every prediction sorts into one of three bins. A
+<span class="term">true positive</span> is a predicted box that matches a real object. A
+<span class="term">false positive</span> is a predicted box that matches nothing — a ghost. A
+<span class="term">false negative</span> is a real object with no matching prediction — a miss. From
+these three counts come the two numbers that matter:</p>
+
+<blockquote><span class="term">Precision</span> = of the boxes I predicted, what fraction were real.
+&nbsp;·&nbsp; <span class="term">Recall</span> = of the real objects, what fraction did I find.</blockquote>
+
+<p>Precision punishes false positives; recall punishes misses. They pull against each other by
+construction: lower your confidence bar and you catch more real objects (recall up) but also wave
+through more clutter (precision down); raise it and the reverse. This is the Chapter&nbsp;1 asymmetry
+returning with a vengeance. Which number you privilege is <em>not</em> a machine-learning question —
+it is a system-design question. A collision-avoidance function on a delivery drone cannot afford to
+miss, so it weights recall; a wildlife-survey dashboard that operators must trust cannot afford to
+cry wolf, so it weights precision. The model is the same; the right operating point is different, and
+only the system knows which.</p>
+
+<div class="note note--warn">
+  <div class="note__label">&#9888; A single accuracy number cannot express this</div>
+  <p>"Accuracy" — fraction of predictions that were correct — is nearly meaningless here. When
+  99.999% of the image is empty sky (Chapter&nbsp;1), a detector that predicts <em>nothing, ever</em>
+  scores astronomically high on any pixel-wise accuracy measure while being completely useless.
+  Precision and recall exist precisely because the interesting events are rare, and rare-event
+  problems break naive averages. Never report accuracy for a detection system; report the pair.</p>
+</div>
+
+<h2><span class="secn">9.3</span> Summarizing a curve: AP and mAP</h2>
+
+<p>Precision and recall are defined <em>at one confidence threshold</em>. But a detector emits a
+confidence for every box, so you have a whole family of (precision, recall) pairs — one for each
+threshold you might pick. Sweep the threshold from strict to permissive and trace the pairs out and
+you get the <span class="term">precision–recall curve</span>: as you admit lower-confidence
+detections, recall climbs and precision generally falls.</p>
+
+<div class="figure">
+<pre>
+  precision
+   1.0 ┤●●●●●●●●●○○
+       │          ○○○           AP = area under this curve.
+   0.8 ┤             ○○         A detector that keeps precision high
+       │               ○○       while recall climbs pushes the curve
+   0.6 ┤                 ○      toward the top-right corner and
+       │                  ○     grows the shaded area toward 1.0.
+   0.4 ┤                   ○
+       │                    ○   The knee — where precision falls off
+   0.2 ┤                     ○  a cliff — is where your usable
+       │                      ○ operating points live.
+   0.0 ┼──┬──┬──┬──┬──┬──┬──┬──┬
+      0.0        0.5         1.0   recall
+</pre>
+<figcaption><b>One curve, one number.</b> <span class="term">Average Precision</span> (AP) is the
+area under the precision–recall curve — a single scalar between 0 and 1 that summarizes the whole
+trade-off. But notice what the scalar throws away: the <em>shape</em>. Two detectors with identical AP
+can have completely different knees, and the knee is where you deploy.</figcaption>
+</div>
+
+<p>Names you will see, defined plainly. <span class="term">AP@50</span> is the area under that curve
+when matches are judged at IoU&nbsp;&ge;&nbsp;0.50. <span class="term">AP@[50:95]</span> averages AP
+over a range of stricter IoU thresholds (0.50, 0.55, … 0.95) — it rewards tight localization, not just
+finding the object. <span class="term">mAP</span> (mean Average Precision) averages AP across all your
+object classes, so one class cannot hide behind another. Each layer of averaging buys a tidier
+headline and pays for it in blindness: mAP@[50:95] is one number standing in for a sweep over
+thresholds, a sweep over IoU levels, and a sweep over classes. It is a fine number for a leaderboard.
+It is a terrible number to ship on.</p>
+
+<h2><span class="secn">9.4</span> The metric the sky actually cares about: false alarms per frame</h2>
+
+<p>Here is the quantity the standard leaderboard metrics quietly bury, and the one that governs a
+clutter-dominated air problem. Precision is a <em>ratio</em>; it tells you what fraction of your boxes
+were wrong but not how many wrong boxes there are per unit of time. For a system running on live video
+that distinction is everything. So we report false alarms in absolute operational units:
+<span class="term">false positives per frame</span> (FPPF) and <span class="term">false positives per
+video-hour</span> (FPPH).</p>
+
+<p>Do the arithmetic and you see why. A detector at 30&nbsp;frames per second with "one false positive
+per frame" is inventing <strong>thirty ghosts every second</strong> — over a hundred thousand per
+hour. A precision of 0.96 sounds excellent until you learn the detector fires a hundred boxes a
+frame, at which point that "excellent" 4% error rate is four false alarms per frame, 120 per second,
+and no downstream tracker or human survives it. Precision hides the absolute count because it is
+normalized by how much you predicted. FPPF and FPPH do not let it hide.</p>
+
+<div class="note note--crit">
+  <div class="note__label">&#10007; A ratio is not a rate</div>
+  <p>Report both, always. Precision answers "when I speak, how often am I right?" FPPF answers "how
+  often do I speak out of turn?" A detector can be superb on the first and catastrophic on the second.
+  For sense-and-avoid and airspace monitoring, the false-alarm <em>rate</em> — in ghosts per frame,
+  per second, per hour — is frequently THE governing metric, the one the promotion gate in §2.5
+  guards. Set a hard ceiling on it and refuse to cross it, no matter how tempting the recall.</p>
+</div>
+
+<h2><span class="secn">9.5</span> You deploy one number: the operating point</h2>
+
+<p>AP integrates over every threshold, but you cannot ship a curve. On the vehicle the detector runs
+at exactly <em>one</em> confidence threshold — the <span class="term">operating point</span> — and
+your real-world performance is whatever the system does <em>there</em>, not the flattering area under
+the whole curve. Choosing that point is a deliberate act: you sweep the threshold, look at the curve,
+and pick the spot that meets your recall requirement at an acceptable false-alarm rate.</p>
+
+<p>A concrete choice for a monitoring build might read: <em>recall &asymp; 0.92 at precision &asymp;
+0.96, roughly 0.1 false positives per frame.</em> That single sentence says more than any AP could:
+it names what fraction of real objects you catch, how clean the catches are, and how many ghosts per
+frame you have agreed to tolerate. Report performance <strong>at the operating point</strong>
+alongside the summary AP, never instead of it — and never let a beautiful AP paper over an operating
+point you would be ashamed to deploy.</p>
+
+<h2><span class="secn">9.6</span> The average is where regressions go to hide: slices and size bins</h2>
+
+<p>Now the heart of the chapter. Aggregate numbers do not merely simplify — they actively conceal
+regressions, because an average can rise while the part you care about falls. The defense is to refuse
+to look at any single number in isolation and instead <span class="term">slice</span> the evaluation:
+compute the metrics separately across meaningful partitions of the data.</p>
+
+<p>The most important slice for this domain is <strong>object pixel size</strong>. Bin every ground-truth
+object by how many pixels it spans and measure recall in each bin. Small-object recall is, for an
+airborne system, the metric that matters — and it is exactly the metric the overall number drowns.</p>
+
+<table>
+  <thead>
+    <tr><th>size bin (px)</th><th>objects</th><th>recall — model A</th><th>recall — model B</th><th>verdict</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>8–16</td><td class="tnum">3,120</td><td class="tnum">0.61</td><td class="tnum">0.48</td><td>B regressed hard</td></tr>
+    <tr><td>16–32</td><td class="tnum">5,880</td><td class="tnum">0.83</td><td class="tnum">0.80</td><td>slight drop</td></tr>
+    <tr><td>32–64</td><td class="tnum">4,410</td><td class="tnum">0.94</td><td class="tnum">0.96</td><td>B better</td></tr>
+    <tr><td>&gt;64</td><td class="tnum">2,190</td><td class="tnum">0.97</td><td class="tnum">0.99</td><td>B better</td></tr>
+    <tr><td><b>overall AP@50</b></td><td class="tnum">15,600</td><td class="tnum"><b>0.851</b></td><td class="tnum"><b>0.857</b></td><td>B "wins"</td></tr>
+  </tbody>
+</table>
+
+<p>Read that table slowly. Model&nbsp;B has the higher overall AP — it would win the gate, win the
+review, win the ship decision. And it is <em>worse at the only thing this system exists to do</em>:
+its recall on the smallest, most distant, most safety-relevant objects collapsed from 0.61 to 0.48.
+B got better at the easy large objects, which are plentiful in the average, and quietly abandoned the
+hard small ones, which are rare in the average but the entire point. <strong>A change that lifts
+overall AP while dropping small-object recall is a regression, and the aggregate hides it by
+design.</strong> Only the slice reveals it.</p>
+
+<p>Size is the first slice, not the last. Slice also by <strong>background</strong> (sky vs. terrain
+vs. horizon), <strong>lighting</strong>, <strong>weather</strong>, <strong>sensor</strong>,
+<strong>source</strong> (which simulator or dataset — closing the loop to Chapter&nbsp;5), and
+<strong>occlusion</strong> (the <code>visible_fraction</code> from §2.1). And tag every failure with a
+controlled vocabulary so failures are countable, not anecdotal:</p>
+
+<p class="code-label">controlled failure vocabulary (attach one or more per miss / false alarm)</p>
+<pre><code>SMALL_OBJECT        object below the size the detector reliably resolves
+LOW_CONTRAST        target too close to background luminance
+MOTION_BLUR         object or camera motion smeared the pixels
+BIRD_CONFUSION      a bird classified as a drone/aircraft, or vice versa
+BACKGROUND_CLUTTER  false positive fired on terrain / cloud edge / glint</code></pre>
+
+<p>Now "the model got worse" becomes "SMALL_OBJECT misses rose 14% and BACKGROUND_CLUTTER false
+alarms doubled over water" — a diagnosis you can act on, feed back into the curation loop
+(Chapter&nbsp;2), and render more of exactly what breaks.</p>
+
+<h2><span class="secn">9.7</span> The pathological validation set</h2>
+
+<div class="case">
+  <div class="case__head">
+    <h3>The war story: a model that looked broken and wasn't</h3>
+    <span class="verdict verdict--crit">What broke: the ruler, not the model</span>
+  </div>
+  <p>A detector was benchmarked, the number came back, and the room went quiet. <strong>AP@50 of about
+  0.13.</strong> Thirteen. By every reading the model was broken — a training run to throw away, weeks
+  of work down the drain. Someone was about to start over.</p>
+  <p>Before scrapping it, an engineer questioned the ruler instead of the model. The evaluation had run
+  against a <em>single</em> held-out flight. That one flight turned out to be a low-altitude airfield
+  scene: the aircraft was taxiing and taking off with terrain filling the entire frame — ground,
+  buildings, runway markings edge to edge. The model had been trained for the air-to-air distribution,
+  small objects against sky. The validation flight was not a hard sample from that distribution; it was
+  a <em>different distribution entirely</em>, a pathological outlier the model was never meant to serve.</p>
+  <p>The same checkpoint — byte for byte, not retrained — was then run against a proper stratified
+  benchmark: about twenty-six diverse flights spanning altitudes, backgrounds, lighting, and object
+  sizes, thousands of objects in all. <strong>AP@50 of about 0.775.</strong> The model was fine. It had
+  been fine the whole time. The 0.13 measured one unusual airfield, not the system.</p>
+  <div class="stats">
+    <div class="stat"><span class="v">0.13</span><span class="l">AP@50 on ONE pathological flight</span></div>
+    <div class="stat"><span class="v">0.775</span><span class="l">AP@50 on ~26 stratified flights</span></div>
+    <div class="stat"><span class="v">1</span><span class="l">checkpoint — identical in both</span></div>
+    <div class="stat"><span class="v">~26</span><span class="l">flights, thousands of objects</span></div>
+  </div>
+</div>
+
+<p>Three lessons live in that gap, and each one is a rule.</p>
+
+<p><strong>A validation set of one thing measures that one thing, not your system.</strong> Variance
+shrinks like 1/N. With one flight, your entire benchmark inherits the quirks of that flight, and every
+number it produces is quantized and noisy — a coin flip dressed up as a measurement. A large, diverse
+benchmark is not a nicety; it is the only thing that makes the number mean anything beyond the samples
+in it.</p>
+
+<p><strong>Freeze a proper, stratified, diverse benchmark once, and never edit it.</strong> Stratify so
+every slice from §9.6 is populated — small objects, terrain backgrounds, hard lighting, each sensor —
+then lock it. A benchmark you keep editing is a ruler whose length changes between measurements; your
+numbers stop being comparable across time, and you can no longer tell a real improvement from a
+relabeled test set. Immutable lineage (Chapter&nbsp;2) applies to the benchmark above all.</p>
+
+<blockquote>A shocking number is a demand to question the ruler before you question the model.</blockquote>
+
+<h2><span class="secn">9.8</span> The training proxy is not the product number</h2>
+
+<p>The number your training loop prints every few hundred steps is a lie you tell yourself for speed —
+and a useful one, as long as you never confuse it with the truth. To stay cheap it is computed on
+<strong>downscaled frames</strong>, over a <strong>small subsample</strong> of validation data (say
+5%), without the sliced, tiled inference you will actually deploy. It is a <span class="term">proxy</span>:
+a fast, biased estimate whose job is to tell you whether training is going up or down, not what your
+system scores.</p>
+
+<p>The real number comes from a <strong>standalone evaluator</strong> — a separate program, run
+deliberately — that performs deployment-faithful sliced inference (the tiling machinery of
+Chapter&nbsp;8) over the entire frozen benchmark, and emits the full sliced report of §9.6. Keep the
+two rigorously separate. The training proxy belongs in the training logs; the evaluator's number is the
+one you quote, gate on, and ship. Quoting the training proxy as your result is the most common way an
+honest team accidentally lies — the proxy runs on easy downscaled data and reads high, and nobody
+notices until real footage disagrees.</p>
+
+<div class="note note--good">
+  <div class="note__label">&#10003; Compare the checkpoint you will actually ship</div>
+  <p>Detectors are trained with a smoothed copy of the weights — an exponential moving average (EMA),
+  or a "best" checkpoint chosen on validation — and that smoothed copy is what deploys, not the raw
+  last-step weights, which are noisy (Chapter&nbsp;6). So evaluate the promoted checkpoint, not the raw
+  ones. When you check reproducibility, judge it as a <em>tolerance</em> on the promoted checkpoint's
+  metric — "within &plusmn;0.005 AP across seeds" — not bit-identical equality, which random data order
+  and nondeterministic kernels make impossible anyway.</p>
+</div>
+
+<h2><span class="secn">9.9</span> Does it generalize? The cross-domain check</h2>
+
+<p>Your frozen benchmark tells you how the model does on the distribution it was built for. It cannot,
+by itself, tell you whether the model <em>generalizes</em> — because the benchmark and the training set
+were drawn from the same well. So you run one more evaluation, on flights from a <strong>different
+batch the model never saw</strong>, captured under conditions outside the training distribution, and
+watch how much performance you retain.</p>
+
+<div class="kpis">
+  <div class="kpi"><span class="kpi__v">0.857</span><span class="kpi__k">AP@50 in-distribution</span><span class="kpi__d">the frozen benchmark</span></div>
+  <div class="kpi"><span class="kpi__v">0.807</span><span class="kpi__k">AP@50 unseen flights</span><span class="kpi__d">a different, held-out batch</span></div>
+  <div class="kpi"><span class="kpi__v">~94%</span><span class="kpi__k">retention</span><span class="kpi__d">generalizes to new flights of the same kind</span></div>
+  <div class="kpi"><span class="kpi__v">not</span><span class="kpi__k">proof of more</span><span class="kpi__d">a new sensor or program is untested</span></div>
+</div>
+
+<p>Retaining about 94% of your score on flights the model never touched is a genuinely good result: it
+means the detector learned the object and the sky, not the particular flights in its training set. But
+be honest about exactly what it proves. It proves generalization to <em>new flights of the same kind</em>
+— same sensor family, same broad program, same rough distribution. It is <strong>not</strong> proof that
+the model will hold up on a new sensor, a new optical path, or a different program, where the pixel
+statistics change underneath it (the whole subject of sim-to-real, Chapter&nbsp;7). Say so, out loud, in
+the report. A metric that overclaims its own scope is just a slower way of being wrong.</p>
+
+<h2><span class="secn">9.10</span> Metric hygiene: trust nothing you haven't sanity-checked</h2>
+
+<p>The evaluator is code, and code has bugs — including bugs that fabricate good news. A measurement
+discipline is a set of habits that keep the ruler honest.</p>
+
+<div class="note note--crit">
+  <div class="note__label">&#10007; The F1 column that silently logged zero</div>
+  <p>In one build, the harness reported an <code>F1</code> column that read <code>0.0</code> for every
+  run — a metric bug in the harness, not the model. The saving grace was that the team never trusted a
+  single number: precision and recall were logged independently and looked sane, so the broken F1 was
+  caught as an inconsistency rather than believed. The lesson is blunt: <strong>do not trust a metric you
+  have not sanity-checked against golden cases</strong> — a handful of hand-verified frames whose correct
+  score you already know. If the evaluator can't reproduce the golden score, fix the evaluator before you
+  believe one word it says about the model.</p>
+</div>
+
+<p>Three more habits complete the hygiene:</p>
+
+<p><strong>Report a sample count or confidence interval on every number.</strong> "AP 0.78" is an
+assertion; "AP 0.78 over 15,600 objects across 26 flights" is a measurement. A number without an N is a
+number you cannot weigh — the pathological 0.13 of §9.7 would have carried "N = 1 flight" in flashing
+letters if the report had demanded it.</p>
+
+<p><strong>Make every failure traceable.</strong> Any miss or false alarm in a report should chase back
+to frame&nbsp;&rarr; source&nbsp;&rarr; model&nbsp;&rarr; dataset lineage (Chapter&nbsp;5). If you cannot
+click a failure and see the exact frame, the exact simulator or capture it came from, and the exact
+checkpoint that missed it, you cannot fix it — you can only guess.</p>
+
+<p><strong>Retire junk metrics.</strong> Some numbers are artifacts of a model's internal structure, not
+measurements of anything in the world — the DETR <span class="term">cardinality</span> count from
+Chapter&nbsp;6 is one: it is pinned by the architecture's fixed query slots and tells you nothing about
+detection quality. A dashboard cluttered with structurally-pinned junk trains people to ignore numbers,
+which is the opposite of what a dashboard is for. Delete metrics that cannot move for reasons you care
+about.</p>
+
+<h2><span class="secn">9.11</span> What honest measurement commits you to</h2>
+
+<p>None of this chapter was a model. All of it was a stance: that the ruler deserves the same
+engineering rigor as the thing it measures, that an average is a claim you must interrogate rather than
+accept, and that the failures an aggregate hides are precisely the ones worth finding. The evaluator you
+build here is the referee for every promotion gate in the book — the leakage check, the real-holdout, the
+small-object floor, the false-alarm ceiling. If the referee cannot be trusted, no gate means anything, and
+the whole disciplined machine downstream is theater.</p>
+
+<p>So measure like it matters, because it does. Freeze the benchmark. Slice the numbers. Report the
+operating point and the false-alarm rate in units a pilot would recognize. Question the ruler before the
+model. Do that, and the number you finally ship is not a summary you hope is true — it is a claim you have
+earned the right to make. Next, in Chapter&nbsp;10, that earned model has to leave the luxurious offline
+plane and survive on the vehicle.</p>
+
+<div class="takeaways">
+  <span class="kicker">Takeaways</span>
+  <ul>
+    <li><b>Build the metrics, then distrust them.</b> IoU decides a match; precision and recall name the
+    two ways to be wrong; AP/mAP summarize the curve — but each layer of averaging buys tidiness with
+    blindness.</li>
+    <li><b>Report false alarms in absolute units.</b> Precision is a ratio; FPPF and FPPH are rates. At
+    30&nbsp;fps, "one false positive per frame" is thirty ghosts a second — often the metric that
+    governs the whole system.</li>
+    <li><b>You ship one operating point, not a curve.</b> Report performance where you actually deploy —
+    e.g. recall&nbsp;0.92 at precision&nbsp;0.96, ~0.1 FP/frame — not just the flattering area under it.</li>
+    <li><b>Slice or be fooled.</b> The average hides regressions by design; a change that lifts overall AP
+    while dropping small-object recall is a regression the aggregate cannot show you.</li>
+    <li><b>Question the ruler first.</b> A validation set of one thing measures that one thing (0.13 on one
+    flight, 0.775 on twenty-six). Freeze a stratified benchmark, separate the training proxy from the
+    product number, and sanity-check every metric against golden cases.</li>
+  </ul>
+</div>
+
+      <nav class="chapnav"><a class="prev" href="08-tiny-objects.html"><span class="dir">‹ Previous</span><span class="ttl">Tiny Objects & Tiling</span></a><a class="next" href="10-deployment.html"><span class="dir">Next ›</span><span class="ttl">Off the Desktop</span></a></nav>
+      <footer class="page-foot">
+        World2Vision · an open field guide to airborne-object perception ·
+        <a href="../index.html">home</a>
+      </footer>
+    </div>
+  </main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

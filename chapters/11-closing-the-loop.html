@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Closing the Loop — World2Vision</title>
+<meta name="description" content="Everything before this chapter built the pipeline once, forward, from an empty simulator to a model running on a vehicle. This chapter bends that line into a circle. A trained…">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<div class="topbar">
+  <button class="topbar__burger" id="burger" aria-label="Open navigation">☰ Contents</button>
+  <span class="topbar__title">Closing the Loop</span>
+</div>
+<div class="scrim" id="scrim"></div>
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <a class="sidebar__brand" href="../index.html">
+      <span class="kicker">World<span aria-hidden="true">2</span>Vision</span>
+      <h1>Seeing the Sky</h1>
+    </a>
+    <p class="sidebar__tagline">Building perception systems that find small, fast objects in the air.</p>
+    <ol class="toc">
+    <li class="toc__part">Front matter</li>
+    <li><a class="" href="00-preface.html"><span class="n">·</span><span>Preface — how to read this</span></a></li>
+    <li class="toc__part">I · The problem & the shape</li>
+    <li><a class="" href="01-the-problem.html"><span class="n">1</span><span>Seeing small things in a big sky</span></a></li>
+    <li><a class="" href="02-the-system.html"><span class="n">2</span><span>The shape of the system</span></a></li>
+    <li class="toc__part">II · Manufacturing truth</li>
+    <li><a class="" href="03-synthetic-worlds.html"><span class="n">3</span><span>Building worlds: synthetic data</span></a></li>
+    <li><a class="" href="04-labels-from-geometry.html"><span class="n">4</span><span>Truth from geometry: labeling</span></a></li>
+    <li><a class="" href="05-datasets.html"><span class="n">5</span><span>Datasets that don't lie</span></a></li>
+    <li class="toc__part">III · Learning to see</li>
+    <li><a class="" href="06-detectors.html"><span class="n">6</span><span>The detectors</span></a></li>
+    <li><a class="" href="07-sim-to-real.html"><span class="n">7</span><span>The sim-to-real gap</span></a></li>
+    <li><a class="" href="08-tiny-objects.html"><span class="n">8</span><span>Tiny objects and tiling</span></a></li>
+    <li class="toc__part">IV · Judgment & the loop</li>
+    <li><a class="" href="09-evaluation.html"><span class="n">9</span><span>Measuring what matters</span></a></li>
+    <li><a class="" href="10-deployment.html"><span class="n">10</span><span>Off the desktop: edge & export</span></a></li>
+    <li><a class="active" href="11-closing-the-loop.html"><span class="n">11</span><span>Closing the loop</span></a></li>
+    </ol>
+  </aside>
+  <main class="content">
+    <div class="reading prose">
+<header class="chap-head">
+  <span class="num">Part IV · Chapter 11</span>
+  <h1>Closing the Loop <em>— the system that improves itself.</em></h1>
+  <p class="lede">Everything before this chapter built the pipeline once, forward, from an empty
+  simulator to a model running on a vehicle. This chapter bends that line into a circle. A trained
+  model is a snapshot; the durable asset is the machine that keeps producing better ones — and this
+  is where we learn to turn the crank.</p>
+</header>
+
+<p>Stand back and look at what we have built. Chapters 3 through 10 marched in a straight line:
+manufacture synthetic worlds, derive labels from geometry, freeze them into leakage-guarded
+datasets, train a detector, close the sim-to-real gap, tile for small objects, evaluate honestly,
+and squeeze the result onto an edge device. It reads like a recipe with a finished dish at the end.</p>
+
+<p>But the dish is not the point, and it never was. A single trained model is the least valuable
+thing this book produces — it is a photograph of your understanding on one particular Tuesday,
+already going stale as the world drifts and the requirements move. The valuable thing is the
+<strong>loop</strong>: the closed circuit, first drawn in <a href="02-the-system.html">Chapter&nbsp;2</a>,
+that ingests data, builds a dataset, trains, evaluates, analyzes failures, curates more of what
+breaks, and retrains — forever, each turn a little better than the last. This chapter is about
+making that circuit actually cycle, and about the single discipline that keeps a self-improving
+system from quietly cheating its way to a lie.</p>
+
+<div class="figure">
+<pre>
+        ┌──────────────────────────────────────────────────────────┐
+        │                                                          │
+        ▼                                                          │
+   ingest ──► build dataset ──► train ──► evaluate on FROZEN       │
+   (synthetic +                                    real benchmark   │
+    mined real)                                        │           │
+        ▲                                              ▼           │
+        │                                    analyze failures      │
+        │                                  (ranked, tagged list)   │
+        │                                              │           │
+        └────── curate MORE OF WHAT BREAKS ◄───────────┘           │
+               synthesize terrain · mine hard real ────────────────┘
+</pre>
+<figcaption><b>The loop is the product.</b> Evaluation does not end the pipeline — it steers it.
+Each named failure becomes a directive for the next batch of data, and the crank turns again. The
+one arrow that must <em>never</em> move is the frozen benchmark: it is the fixed point everything
+else rotates around.</figcaption>
+</div>
+
+<h2><span class="secn">11.1</span> Failure analysis is the steering wheel</h2>
+
+<p>In <a href="09-evaluation.html">Chapter&nbsp;9</a> we insisted that an evaluation is not a
+grade — it is a diagnosis. A good evaluation does not hand you a single number and walk away; it
+hands you a <strong>ranked list of failures</strong>, each one tagged with a reason
+(<code>SMALL_OBJECT</code>, <code>BACKGROUND_CLUTTER</code>, <code>MOTION_BLUR</code>,
+<code>TERRAIN</code>) and traceable back through immutable lineage to the exact frame, sequence,
+and dataset snapshot it came from. That ranked list is the most important output the offline plane
+produces, because <strong>each tag is an instruction for what data to make next</strong>.</p>
+
+<p>This reframes the whole enterprise. The question after an evaluation is never "is the model good?"
+It is "what is the model worst at, and what would fix it?" And the answer, far more often than
+beginners expect, is not a new architecture. It is data. A model that fails a whole category of
+scenes is usually not too small or too shallow — it is <em>ignorant</em>, because nothing in its
+training set ever showed it that category. The failure list is a shopping list, and the steering
+wheel of the entire loop is your willingness to read it literally.</p>
+
+<h2><span class="secn">11.2</span> One full turn of the crank</h2>
+
+<p>Let us make this concrete with the hard case from Chapter&nbsp;9 — the one that embarrassed an
+otherwise excellent model. On high-altitude flights the detector was superb. But on
+<strong>low-altitude flights, where the camera tilts down and terrain fills the frame</strong>, it
+came apart: it false-alarmed constantly on ridgelines, treeline edges, and rooftops, inventing
+aircraft where there were only rocks. The aggregate score barely moved — those flights were a small
+slice of the benchmark — but the slice was near-unusable.</p>
+
+<p>The naive reaction is to reach for the model: add capacity, add a clutter-rejection head, tune a
+threshold. The disciplined reaction is to ask where this failure was <em>born</em>. And the lineage
+answers immediately. Trace the training data back to the <a href="03-synthetic-worlds.html">synthetic
+generator</a> of Chapter&nbsp;3, and the cause is glaring: the simulator had been configured, months
+earlier, to render mostly <strong>empty-sky</strong> scenes — clean backgrounds that made early
+training easy. The model had almost never seen ground. It false-alarmed on ridgelines because, as
+far as its training experience was concerned, ridgelines did not exist. This is not a modeling
+defect. It is a <span class="term">data gap</span>: a category of the real world that is
+systematically absent or under-represented in your training set, so the model has no basis to handle
+it. The failure analysis did not just describe a weakness — it wrote the next data-generation ticket.</p>
+
+<p>So the fix is a sentence, not a redesign: <em>tell the simulator to synthesize terrain and
+ground-filled scenes.</em> Point the virtual camera down. Populate the frame with mountains, fields,
+buildings, water. Re-run the geometry-derived labeler (<a href="04-labels-from-geometry.html">Chapter&nbsp;4</a>)
+— which does not care what the background is — build a new immutable snapshot, retrain, and re-measure
+on the <em>same frozen benchmark</em>. That is one complete circuit of the loop, and here is what it
+bought:</p>
+
+<div class="case">
+  <div class="case__head">
+    <h3>One turn of the crank: the terrain gap</h3>
+    <span class="verdict verdict--good">gap closed, no regression</span>
+  </div>
+  <p>A model strong on empty-sky scenes was false-alarming on every ridgeline the moment the
+  camera tilted toward the ground. The failure list tagged the slice <code>TERRAIN</code> and the
+  lineage traced it to a simulator configured for empty skies. The hypothesis was stated before any
+  work began: <em>the model has never seen ground; render ground and the false alarms will fall,
+  and the empty-sky performance will not regress.</em> Terrain scenes were synthesized, labeled by
+  geometry, snapshotted, and folded into training. Then the same frozen benchmark was re-run.</p>
+  <div class="stats">
+    <div class="stat"><span class="v">0.11</span><span class="l">terrain-slice recall — before</span></div>
+    <div class="stat"><span class="v">0.79</span><span class="l">terrain-slice recall — after</span></div>
+    <div class="stat"><span class="v">~28×</span><span class="l">ridgeline false alarms — before</span></div>
+    <div class="stat"><span class="v">1×</span><span class="l">ridgeline false alarms — after</span></div>
+  </div>
+  <p>The empty-sky slice was checked separately and did not move — the win was real, not a trade.
+  One hypothesis, one named gap, one batch of targeted data, one measured result on an unchanged
+  yardstick. That is the loop working exactly as designed.</p>
+</div>
+
+<p>Notice what made this legible. Because the benchmark was frozen, the before and after numbers
+are comparable — they are measured against the identical set of frames. Because the empty-sky slice
+was tracked separately, we could prove the fix did not secretly break something else. The
+per-slice honesty of Chapter&nbsp;9 is not bureaucracy; it is what lets a single turn of the crank
+be a <em>hypothesis with a stated expected failure mode and a measured result</em>, rather than a
+hopeful shove in the dark.</p>
+
+<h2><span class="secn">11.3</span> Active learning: spend the labeling budget where it hurts</h2>
+
+<p>Synthetic terrain fixed a gap we could name. But some gaps live in the real world in forms no
+simulator anticipates — a particular haze, an unusual glint, a bird that banks exactly like a
+quadcopter. For those you need real footage. And here Chapter&nbsp;1's central scarcity returns
+with force: you have <em>oceans</em> of unlabeled real video and a <em>thimble</em> of labeling
+budget. A human can only box so many twenty-pixel specks, and every one costs money and attention.</p>
+
+<p>The mistake is to label randomly. Randomly sampled frames are mostly easy — empty sky the model
+already handles perfectly — so you pay full price for labels that teach the model nothing. The
+better strategy is <span class="term">active learning</span>: instead of labeling at random, you
+spend the scarce labeling budget on the frames where the model is most <strong>uncertain</strong>
+or most <strong>wrong</strong>, because those are the frames that carry the most information. You
+let the model tell you what it does not know, and you go label exactly that.</p>
+
+<p>Concretely, you make the mining criteria first-class machinery — an
+<span class="term">uncertainty / failure sample queue</span>: a standing component whose job is to
+sift unlabeled real footage and surface the frames most worth a human's time. It looks for:</p>
+
+<ul>
+  <li><strong>Borderline confidences</strong> — detections sitting right at the decision threshold,
+  where the model is genuinely torn.</li>
+  <li><strong>Disagreements between checkpoints</strong> — frames where two versions of the model,
+  or two nearby training epochs, predict different things. Disagreement is a fingerprint of
+  ambiguity.</li>
+  <li><strong>High false-positive density</strong> — frames where the model fires many detections in
+  a region that a quick check says is clutter, exactly the ridgeline-style failures that erode trust.</li>
+</ul>
+
+<p>Those frames go into the queue, a human labels them, and — split by sequence, always — they join
+the dataset for the next retrain. The budget flows to the hard cases, the model learns precisely
+where it was failing, and the queue refills itself from the next evaluation. Active learning is the
+loop's second inlet: synthetic data for gaps you can describe, mined real data for gaps only the
+model can point at.</p>
+
+<h2><span class="secn">11.4</span> The loop that teaches itself can also fool itself</h2>
+
+<div class="note note--crit">
+  <div class="note__label">✗ The curation loop must not cheat</div>
+  <p>Every mechanism in this chapter adds freshly mined real frames to the training set, turn after
+  turn. That is exactly the condition under which a system quietly starts grading its own homework.
+  If a newly mined hard frame lands in <em>both</em> training and the evaluation benchmark, the next
+  model will "improve" on that frame for the worst possible reason — it memorized the answer. The
+  loop will report progress that is pure <strong>leakage</strong>. The
+  <a href="05-datasets.html">Chapter&nbsp;5</a> guards are what stand between a self-improving system
+  and a self-deceiving one: every mined frame is split <strong>by sequence</strong>, never by frame,
+  so an entire flight lands wholly in train or wholly in test and never straddles the line; and the
+  <strong>frozen evaluation benchmark never absorbs newly mined frames</strong> — it is the fixed
+  yardstick, immutable by construction, or it measures nothing. A loop that can teach itself can
+  also fool itself. These guards are the only reason it does the first and not the second.</p>
+</div>
+
+<p>It is worth sitting with why this danger is <em>structural</em> rather than accidental. In a
+one-shot pipeline, leakage is a mistake you might make once. In a loop, leakage is a
+<em>gradient</em> the system will happily descend if you let it: the easiest way to make next
+quarter's number go up is to let a little test data leak into training, and a loop optimizing for
+that number will find the leak like water finds a crack. The immutable-snapshot and sequence-split
+disciplines are not hygiene you perform out of tidiness. In a self-improving system they are the
+load-bearing wall. Remove them and the loop does not slow down — it accelerates, confidently, into
+a fantasy.</p>
+
+<h2><span class="secn">11.5</span> Tracking: closing the time loop</h2>
+
+<p>Chapter&nbsp;1 argued that time is signal, not noise, and Chapter&nbsp;2 baked stable object
+identities into the canonical record precisely so we could use it. Here is where that investment
+pays off. A per-frame detector, however good, flickers: it misses a faint object for one frame,
+invents a ghost on a cloud edge for another, and reports a jittering box even on objects it holds.
+Each of those is a single-frame error, and single-frame errors have a single-frame cure — look at
+the frames around them.</p>
+
+<p>A <span class="term">tracker</span> — a component that associates detections across consecutive
+frames into persistent <strong>tracks</strong>, each with its own identity over time — turns a
+stream of flickering boxes into stable trajectories. Start with the simple, honest thing: a
+deterministic motion-and-association tracker that predicts where each object should be next and
+matches new detections to those predictions by proximity. Reach for appearance embeddings — learned
+per-object visual signatures — only if a benchmark actually demands them; at twenty pixels there is
+often little appearance to embed, and the motion model does most of the work. Temporal consistency
+does the rest: a real aircraft persists across many frames, so a track can survive a one-frame miss;
+a cloud-edge ghost appears for an instant and never coheres into a track, so it can be suppressed.
+Tracking smooths both failure modes at once — the miss and the false alarm — using nothing but the
+time axis the detector threw away.</p>
+
+<div class="note">
+  <div class="note__label">▸ Tracking is its own evaluation surface</div>
+  <p>Do not assume a better detector means better tracks — measure it. Tracking has failure modes a
+  per-frame metric cannot see: <strong>fragmentation</strong> (one real object broken into several
+  short tracks), <strong>ID switches</strong> (two objects swapping identities as they cross), and
+  <strong>false-track lifetime</strong> (how long a ghost survives before it dies). These belong in
+  the evaluation report of Chapter&nbsp;9 as their own tagged slices, feeding the same loop. A model
+  that improves per-frame recall while quietly tripling ID switches has not improved — and only a
+  tracking metric will tell you.</p>
+</div>
+
+<h2><span class="secn">11.6</span> Transfer and distillation: teaching the small model</h2>
+
+<p>One more strand closes back on Chapter&nbsp;10. The edge model that has to run on the vehicle is
+deliberately small and fast, and it paid for that speed in accuracy — a smaller network simply cannot
+represent as much as a large one. But you also have, sitting in the offline plane, a big model with
+no latency budget at all, free to be as accurate as your GPUs allow. It would be a waste to let the
+small model learn only from the raw labels when a wiser teacher is right there.</p>
+
+<p>That is <span class="term">knowledge distillation</span>: training a small "student" model to
+imitate the outputs of a large, accurate "teacher" model, so the student inherits some of the
+teacher's judgment that it could never have learned from hard labels alone. The teacher's soft
+outputs — <em>this is 70% likely an aircraft, 20% a bird</em> — carry more information than a bare
+box, and the student trained to match them recovers accuracy it lost to its size and latency budget.
+It pairs naturally with the transfer learning of <a href="06-detectors.html">Chapter&nbsp;6</a>, and
+the two are worth keeping distinct: transfer learning reused <em>general</em> features learned on some
+vast unrelated corpus; distillation reuses <em>your own</em> big model's hard-won judgment about your
+specific sky. One borrows from the world; the other bequeaths from your best work to your fastest.</p>
+
+<h2><span class="secn">11.7</span> Epilogue — the pipeline is the product</h2>
+
+<p>So here, at last, is the whole machine, and it is a loop. A measured gap on a real holdout becomes
+a hypothesis with a named failure mode. The hypothesis becomes targeted data — synthetic terrain for
+the gaps you can describe, mined real hard cases for the gaps only the model can point at. The data
+becomes a new immutable snapshot, split by sequence so it cannot leak. The snapshot trains a new
+model, which is measured on the <em>same</em> frozen benchmark, per slice, so that improvements are
+real and regressions cannot hide behind an aggregate average. And that measurement produces the next
+gap. Every turn of the crank is a hypothesis, an intervention, and a result — a small act of science,
+repeated until the system is good enough and then repeated some more to keep it there as the world
+drifts underneath it.</p>
+
+<blockquote>The model is a photograph. The loop is the camera. Build the camera.</blockquote>
+
+<p>You now have every piece. You can stand up a deterministic synthetic-data generator that renders
+worlds you control. You can derive perfect labels from the geometry that placed the objects. You can
+freeze data into immutable, leakage-guarded snapshots that make every claim reproducible. You can
+train a detector and evaluate it honestly, per slice, refusing to be fooled by a flattering average.
+You can keep small objects alive through tiling, ship the result to an austere edge device, associate
+detections into stable tracks across time, and — the subject of this final chapter — close the loop so
+the whole system teaches itself, without letting it cheat. What changes from one problem to the next
+is only the objects and the sensor: swap the drone for a bird, the visible camera for an infrared one,
+and the machinery is unchanged. The pipeline is the product. It always was.</p>
+
+<p>Return, one last time, to the very first image in this book: the green box that marks where the
+object truly is, and the red box the model draws for where it thinks the object is. Across eleven
+chapters we have worked to make those two boxes coincide. They never perfectly will. There will always
+be a fainter object, a stranger cloud, a terrain the simulator has not imagined, a flight in a light
+no one has flown before. The gap between the green box and the red box does not close to zero and then
+stay there — it is not a problem you finish. It is a loop you get better at turning. So turn it well,
+turn it honestly, and turn it again.</p>
+
+<div class="takeaways">
+  <span class="kicker">Takeaways — and the closing summary of the book</span>
+  <ul>
+    <li><b>The loop is the asset, not the model.</b> A trained model is a snapshot that goes stale;
+    the durable product is the closed circuit — ingest, train, evaluate, analyze, curate, retrain —
+    that keeps making better ones.</li>
+    <li><b>Failure analysis steers.</b> An evaluation is a ranked, tagged list of failures, and each
+    tag is a directive for the next batch of data. A terrain false-alarm was not a modeling defect
+    but a data gap; the fix was to tell the simulator to render ground.</li>
+    <li><b>Spend the labeling budget where the model is wrong.</b> Active learning mines uncertain and
+    failing real frames into a standing queue, so scarce human labels go where they move the needle.</li>
+    <li><b>The self-improving loop must not cheat.</b> Sequence-level splits and a frozen benchmark are
+    the load-bearing wall — in a loop, leakage is a gradient the system will descend unless the
+    Chapter&nbsp;5 guards forbid it.</li>
+    <li><b>Time closes the loop twice:</b> a tracker turns flickering per-frame boxes into stable
+    tracks with their own metrics, and distillation lets your big model teach the small one. What
+    changes across problems is the objects and the sensor; the pipeline is the product, and it is
+    never finished — only turned again.</li>
+  </ul>
+</div>
+
+      <nav class="chapnav"><a class="prev" href="10-deployment.html"><span class="dir">‹ Previous</span><span class="ttl">Off the Desktop</span></a></nav>
+      <footer class="page-foot">
+        World2Vision · an open field guide to airborne-object perception ·
+        <a href="../index.html">home</a>
+      </footer>
+    </div>
+  </main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

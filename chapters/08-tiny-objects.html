@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tiny Objects & Tiling — World2Vision</title>
+<meta name="description" content="A detector has a fixed, modest input resolution. A real sensor frame is enormous. Naively reconciling the two destroys exactly the small objects you built the whole system to…">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<div class="topbar">
+  <button class="topbar__burger" id="burger" aria-label="Open navigation">☰ Contents</button>
+  <span class="topbar__title">Tiny Objects & Tiling</span>
+</div>
+<div class="scrim" id="scrim"></div>
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <a class="sidebar__brand" href="../index.html">
+      <span class="kicker">World<span aria-hidden="true">2</span>Vision</span>
+      <h1>Seeing the Sky</h1>
+    </a>
+    <p class="sidebar__tagline">Building perception systems that find small, fast objects in the air.</p>
+    <ol class="toc">
+    <li class="toc__part">Front matter</li>
+    <li><a class="" href="00-preface.html"><span class="n">·</span><span>Preface — how to read this</span></a></li>
+    <li class="toc__part">I · The problem & the shape</li>
+    <li><a class="" href="01-the-problem.html"><span class="n">1</span><span>Seeing small things in a big sky</span></a></li>
+    <li><a class="" href="02-the-system.html"><span class="n">2</span><span>The shape of the system</span></a></li>
+    <li class="toc__part">II · Manufacturing truth</li>
+    <li><a class="" href="03-synthetic-worlds.html"><span class="n">3</span><span>Building worlds: synthetic data</span></a></li>
+    <li><a class="" href="04-labels-from-geometry.html"><span class="n">4</span><span>Truth from geometry: labeling</span></a></li>
+    <li><a class="" href="05-datasets.html"><span class="n">5</span><span>Datasets that don't lie</span></a></li>
+    <li class="toc__part">III · Learning to see</li>
+    <li><a class="" href="06-detectors.html"><span class="n">6</span><span>The detectors</span></a></li>
+    <li><a class="" href="07-sim-to-real.html"><span class="n">7</span><span>The sim-to-real gap</span></a></li>
+    <li><a class="active" href="08-tiny-objects.html"><span class="n">8</span><span>Tiny objects and tiling</span></a></li>
+    <li class="toc__part">IV · Judgment & the loop</li>
+    <li><a class="" href="09-evaluation.html"><span class="n">9</span><span>Measuring what matters</span></a></li>
+    <li><a class="" href="10-deployment.html"><span class="n">10</span><span>Off the desktop: edge & export</span></a></li>
+    <li><a class="" href="11-closing-the-loop.html"><span class="n">11</span><span>Closing the loop</span></a></li>
+    </ol>
+  </aside>
+  <main class="content">
+    <div class="reading prose">
+<header class="chap-head">
+  <span class="num">Part III · Chapter 8</span>
+  <h1>Tiny Objects &amp; Tiling <em>— keeping a twenty-pixel target alive all the way to the network.</em></h1>
+  <p class="lede">A detector has a fixed, modest input resolution. A real sensor frame is enormous.
+  Naively reconciling the two destroys exactly the small objects you built the whole system to
+  catch. This chapter is about the single most effective technique for small-object detection —
+  and the runtime bill it hands you.</p>
+</header>
+
+<p>Chapter&nbsp;1 promised that small objects would demand their own chapter, and Chapter&nbsp;7
+named the culprit in the sim-to-real accounting: a <a href="07-sim-to-real.html">resolution
+mismatch</a> between what your model expects and what the sensor delivers. This is the chapter
+where we fix it. The fix is conceptually simple, easy to get subtly wrong, and the most expensive
+thing your runtime will do. Let us earn all three of those claims.</p>
+
+<h2><span class="secn">8.1</span> The object is destroyed before layer one</h2>
+
+<p>Object detectors take a fixed input size. Depending on the architecture that might be 560 or
+640 pixels on a side — a deliberate compromise between accuracy and speed baked into the network
+when it was designed. Your sensor, meanwhile, produces something far larger: call it
+<strong>2448&nbsp;&times;&nbsp;2048</strong>, a perfectly ordinary five-megapixel frame.</p>
+
+<p>Now do the obvious thing. Hand the whole frame to the detector. To fit a 2448-pixel-wide image
+into a 560-pixel input, the framework must shrink it by a factor of roughly
+<strong>4.4&times;</strong>. Every dimension in the image shrinks with it — including the object.
+That twenty-pixel aircraft from Chapter&nbsp;1 is now <strong>four or five pixels</strong> across.
+Four pixels is below the floor at which the network can resolve anything at all. There is no
+feature to extract, no edge to find, no gradient that means "aircraft." The object was not missed
+by the detector. It was <em>erased by the preprocessing</em>, before the first convolution ever
+ran.</p>
+
+<blockquote>Downscaling the whole frame does not make small-object detection hard. It makes it
+impossible — the information is gone before the model is allowed to look.</blockquote>
+
+<p>This is the trap that swallows newcomers. They pick a good detector, train it well, and watch
+it score beautifully on large objects and blindly on small ones, and they blame the model. The
+model never had a chance. The pixels that carried the object were thrown away at the door.</p>
+
+<h2><span class="secn">8.2</span> Tiling: cut the frame, not the object</h2>
+
+<p>The fix is to stop shrinking. Instead of squeezing a huge frame down to fit a small input, we
+cut the huge frame into a grid of smaller pieces — each one at, or near, the detector's native
+input size — and run the detector on each piece independently. Then we take all the per-piece
+detections and translate them back into full-frame coordinates. This is
+<span class="term">tiling</span> (also called <span class="term">sliced inference</span>, and in
+one widely used formulation <span class="term">SAHI</span>, for "Slicing Aided Hyper Inference"):
+detect on many native-resolution crops of one frame, then merge the results.</p>
+
+<p>The magic is that scale is now preserved. Inside a tile, the detector sees the frame at full
+resolution. That twenty-pixel object stays twenty pixels. It is no longer competing for survival
+against a 4.4&times; downscale — it arrives at the network with every pixel it started with, on a
+background the network can actually study.</p>
+
+<div class="figure">
+<pre>
+  one 2448 × 2048 frame, cut into a grid of overlapping tiles
+  ┌───────────┬─┬───────────┬─┬───────────┐
+  │           │▓│           │▓│           │   each tile ≈ 576 px, fed to the
+  │   tile     ▓   tile      ▓   tile     │   detector at NATIVE resolution
+  │  (0,0)    │▓│  (1,0)    │▓│  (2,0)    │
+  ├───────────┼─┼───────────┼─┼───────────┤   ▓ = overlap seam: shared by
+  │▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓│   the two tiles on either side,
+  ├───────────┼─┼───────────┼─┼───────────┤   so an object on the boundary
+  │   tile    │▓│   tile   ·▓│   tile     │   is whole in at least one tile.
+  │  (0,1)    │▓│  (1,1)   ▲ │  (2,1)     │
+  │           │▓│          └─┼─ 20-px target, intact: still 20 px here
+  └───────────┴─┴───────────┴─┴───────────┘
+</pre>
+<figcaption><b>Cut the frame, not the object.</b> The whole-frame downscale erases the target;
+the tile preserves it. The cost is that you now run the detector once per tile instead of once per
+frame — the trade-off the rest of the chapter is about.</figcaption>
+</div>
+
+<h2><span class="secn">8.3</span> Overlap and the merge, where it goes wrong</h2>
+
+<p>A grid of clean, non-touching tiles has an obvious bug: an object sitting on a tile boundary
+gets sliced in half, and each half is a mangled fragment that neither tile detects well. The fix
+is <strong>overlap</strong>. Adjacent tiles share a band of pixels — the shaded seams in the
+figure — wide enough that any object smaller than the band is fully contained in at least one
+tile. Overlap is not optional; it is the price of not losing objects at the seams.</p>
+
+<p>Overlap creates its own problem, and this is where tiling implementations quietly go wrong. An
+object in the shared band is seen by <em>two</em> tiles, so it is detected twice. After you
+translate both boxes into full-frame coordinates, you have two overlapping boxes for one real
+object. If you do nothing, your system reports a phantom pair where there is a single aircraft.</p>
+
+<p>The cure is <span class="term">Non-Maximum Suppression</span> (NMS): among a cluster of boxes
+that overlap heavily, keep the one with the highest confidence and suppress the rest. Run NMS on
+the merged, full-frame detections — <em>after</em> translation, not before — and the double
+detection collapses back to one. The merge, done correctly, is a three-step ritual, and every
+step is a place people get it wrong:</p>
+
+<ol>
+  <li><b>Translate.</b> A box detected at tile-local coordinates <code>(x, y)</code> becomes a
+  full-frame box at <code>(x + tile_origin_x, y + tile_origin_y)</code>. Forget the tile origin and
+  every detection piles up in the top-left corner. This is the single most common tiling bug.</li>
+  <li><b>Pool.</b> Gather every translated box from every tile into one flat list against the full
+  frame. Detections must compete globally, not within their tile.</li>
+  <li><b>Suppress.</b> Run NMS over the pooled list so overlap-region duplicates are removed and one
+  object yields one box.</li>
+</ol>
+
+<div class="note note--warn">
+  <div class="note__label">&#9888; The subtle failure is silent</div>
+  <p>None of these mistakes throws an error. Skip the origin translation and you still get plausible
+  boxes — just all crowded into one corner. Skip the global NMS and you still get detections — just
+  doubled along every seam, which quietly inflates your false-positive count and wrecks the metric in
+  <a href="09-evaluation.html">Chapter&nbsp;9</a>. Tiling bugs do not crash; they lie. Verify the merge
+  by eye on a frame with a known object straddling a boundary before you trust a single number.</p>
+</div>
+
+<h2><span class="secn">8.4</span> Tile at train and eval, not just at deploy</h2>
+
+<p>Tiling is not a runtime trick you bolt on at the end. It is a property of the data the whole
+pipeline agrees on, and it must be applied consistently at all three stages — or the numbers you
+report will not mean what you think.</p>
+
+<p>For <strong>training</strong>, you crop tiles around and near objects, so the detector learns on
+crops that look like the crops it will see at inference. For <strong>deployment</strong>, you run
+the full overlapping grid over each live frame. And for <strong>evaluation</strong> — this is the
+part teams skip — you must score on a <em>deterministic, full-coverage tile grid</em> over the whole
+frame, and you must <strong>keep the empty tiles.</strong></p>
+
+<p>That last instruction is the one that separates an honest metric from a flattering one. Most
+tiles in a real frame contain no object at all — they are pure sky, cloud, or terrain. Those empty
+tiles are precisely where false positives are born, because they are nothing <em>but</em> the
+adversarial background of Chapter&nbsp;1. If your evaluation quietly drops the empty tiles and scores
+only on tiles that happen to contain an object, you have deleted every opportunity the model had to
+raise a false alarm. Your precision looks wonderful and your product does not exist. Keeping the
+empty tiles is the same matched-distribution discipline Chapter&nbsp;7 used to cure its train/eval
+mismatch: evaluate on the distribution you will actually deploy on, seams, sky, and all.</p>
+
+<h2><span class="secn">8.5</span> The payoff: the product metric</h2>
+
+<p>Sliced inference over the whole frame, with full coverage and honest empty tiles, is not just
+<em>a</em> number — it is <em>the</em> number. It is the metric that reflects what the system does
+in deployment: take a real frame, tile it, detect, merge, and report. When a build quotes this
+figure, it is quoting the product.</p>
+
+<div class="kpis">
+  <div class="kpi"><span class="kpi__v">0.922</span><span class="kpi__k">AP@50, sliced whole-frame</span><span class="kpi__d">the deployable product metric, not a tile-only score</span></div>
+  <div class="kpi"><span class="kpi__v">0.91 / 0.92</span><span class="kpi__k">precision / recall</span><span class="kpi__d">catches the objects, resists the clutter</span></div>
+  <div class="kpi"><span class="kpi__v">~0.095</span><span class="kpi__k">false positives / frame</span><span class="kpi__d">≈ one false alarm per ten full frames, normal flights</span></div>
+  <div class="kpi"><span class="kpi__v">4–5 px</span><span class="kpi__k">what the naive path leaves</span><span class="kpi__d">whole-frame downscale, object destroyed</span></div>
+</div>
+
+<p>In one build, the sliced whole-frame pipeline reached <strong>AP@50 around 0.922</strong>, with
+precision near 0.91 and recall near 0.92, and a false-positive rate around
+<strong>0.095 per frame</strong> — roughly one false alarm for every ten full frames on normal
+flights. That is a deployable system. Contrast it with the naive whole-frame-downscale path from
+&sect;8.1, which does not have a lower score on small objects so much as it has <em>no ability to
+see them at all</em>. The gap between those two numbers is the entire justification for the cost we
+are about to incur.</p>
+
+<h2><span class="secn">8.6</span> More pixels are not more signal</h2>
+
+<p>Here is the seductive next thought. If tiling helps by giving the object more pixels, then
+zooming in should help even more. Magnify the frame 2&times; and use smaller tiles — say 280
+pixels — so each object is rendered across four times the area. Surely a target the network can
+see <em>bigger</em> is a target it can see <em>better</em>. It is a reasonable hypothesis. It is
+also wrong, and the way it is wrong is worth internalizing.</p>
+
+<div class="case">
+  <div class="case__head">
+    <h3>The 2&times; magnification that made things worse</h3>
+    <span class="verdict verdict--crit">Rejected</span>
+  </div>
+  <p>A team hypothesized that if tiling wins by adding pixels, more magnification would win harder.
+  They rebuilt the pipeline at 2&times; magnification with smaller 280-pixel tiles, upsampling each
+  object to roughly four times its native pixel count before the detector saw it. The result went
+  the wrong way. AP@50 <em>dropped</em> — on the order of 0.835 against 0.857 for the plain
+  tiling baseline — while the runtime cost rose by about <strong>3.5&times;</strong>, because
+  smaller tiles mean far more tiles per frame. They paid triple and got less.</p>
+  <div class="stats">
+    <div class="stat"><span class="v">0.857</span><span class="l">AP@50, plain tiling</span></div>
+    <div class="stat"><span class="v">0.835</span><span class="l">AP@50, 2× magnified</span></div>
+    <div class="stat"><span class="v">~3.5×</span><span class="l">runtime cost of the zoom</span></div>
+    <div class="stat"><span class="v">more</span><span class="l">tiles, more false positives</span></div>
+  </div>
+  <p><b>Root cause.</b> Magnification adds pixels but not <span class="term">signal-to-noise</span>
+  — the ratio of real object information to sensor noise and clutter. A blurry five-pixel smear
+  upsampled to twenty pixels is still a five-pixel smear's worth of information. You have not
+  recovered any detail that was not captured; you have interpolated between the pixels you had and
+  added interpolation artifacts on top. Meanwhile the smaller tiles multiplied the tile count, and
+  every extra tile is another patch of empty sky that can produce a false positive. The net was
+  less truth at higher cost.</p>
+</div>
+
+<blockquote>Tiling preserves the signal you captured. Magnification inflates the pixels around it.
+Only one of those is information — more tiles are not more truth.</blockquote>
+
+<h2><span class="secn">8.7</span> The constraints you will actually hit</h2>
+
+<p>Two practical realities turn the clean idea of &sect;8.2 into an engineering negotiation, and
+both deserve to be stated before they bite you.</p>
+
+<div class="note note--crit">
+  <div class="note__label">&#10007; The stride constraint: your tile is not the size you think</div>
+  <p>Most detectors require input dimensions <strong>divisible by 32</strong> — a consequence of the
+  network downsampling the image by factors of two several times (its <em>stride</em>). A "560" tile
+  is not divisible by 32; the nearest valid size up is <strong>576</strong>. Get this wrong and the
+  framework does one of two unhelpful things: it silently pads your tile to a legal size, shifting
+  every coordinate and quietly corrupting the merge in &sect;8.3, or it errors out mid-run. Choose
+  tile sizes that are multiples of 32 on purpose, and know the real number, because the coordinate
+  math depends on it.</p>
+</div>
+
+<div class="note note--warn">
+  <div class="note__label">&#9888; Tiling multiplies inference cost</div>
+  <p>The whole-frame path is one forward pass per frame. Tiling is <strong>N forward passes</strong>
+  for N tiles — a 3&times;3 grid is nine times the compute, plus overlap. On a workstation that is a
+  shrug. On the vehicle, where <a href="10-deployment.html">Chapter&nbsp;10</a> counts every
+  millisecond and milliwatt, N is a hard budget line. The tile count is the most direct
+  accuracy-versus-latency knob in the entire system: more, smaller tiles catch more tiny objects and
+  cost more time; fewer, larger tiles are cheaper and start dropping the faint ones.</p>
+</div>
+
+<h2><span class="secn">8.8</span> The trade-off, plainly</h2>
+
+<p>Tiling is the single most effective technique for small-object detection and the single most
+expensive thing your runtime does. Those two facts are inseparable. You do not get the 0.922 without
+paying for N forward passes, and you cannot pay for unlimited forward passes on a vehicle with a
+fixed power and latency budget. So tiling is not a setting you turn on; it is a set of dials you
+tune — tile size, overlap fraction, and tile count — against the object sizes you must catch and the
+milliseconds and milliwatts you have to spend.</p>
+
+<p>The right operating point is not universal. A wildlife survey running offline on recorded footage
+can afford a dense grid and chase every faint bird. A collision-avoidance system on a small platform
+may have the budget for only a coarse grid and must accept that the very smallest, very faintest
+objects will slip through until they grow. That choice is a system decision in exactly the sense
+Chapter&nbsp;1 warned about — and, like everything else in this book, it is a decision about the
+pipeline, not the model. The pipeline is the product.</p>
+
+<div class="takeaways">
+  <span class="kicker">Takeaways</span>
+  <ul>
+    <li><b>Downscaling destroys the object.</b> Fitting a 2448-px frame into a 560-px input shrinks
+    a 20-px target to 4–5 px — below resolvability — before the network ever runs. That is the
+    resolution mismatch, and it is fatal.</li>
+    <li><b>Tiling cuts the frame, not the object.</b> Detect on native-resolution tiles, then merge
+    to full-frame coordinates. The object keeps every pixel it started with.</li>
+    <li><b>Overlap, then merge carefully.</b> Overlap so boundary objects stay whole; then translate
+    by tile origin, pool globally, and de-duplicate with NMS. These bugs are silent — verify by eye.</li>
+    <li><b>Evaluate on the deploy distribution.</b> Use a deterministic full-coverage grid and keep
+    the empty tiles — they are where false positives live. Dropping them fakes the score.</li>
+    <li><b>Magnification is not free SNR.</b> More pixels are not more signal; a 2× zoom once dropped
+    AP@50 at 3.5× the cost. More tiles are not more truth.</li>
+    <li><b>Tile count is the accuracy-vs-latency knob.</b> N tiles ≈ N forward passes; mind the
+    &divide;32 stride constraint, and tune tile size, overlap, and count against the budget you carry
+    on the vehicle.</li>
+  </ul>
+</div>
+
+      <nav class="chapnav"><a class="prev" href="07-sim-to-real.html"><span class="dir">‹ Previous</span><span class="ttl">The Sim-to-Real Gap</span></a><a class="next" href="09-evaluation.html"><span class="dir">Next ›</span><span class="ttl">Measuring What Matters</span></a></nav>
+      <footer class="page-foot">
+        World2Vision · an open field guide to airborne-object perception ·
+        <a href="../index.html">home</a>
+      </footer>
+    </div>
+  </main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>

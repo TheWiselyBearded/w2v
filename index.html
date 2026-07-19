@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A field guide to airborne-object perception — World2Vision</title>
+<meta name="description" content="A textbook for building computer-vision systems that detect and track small, fast-moving objects in the air — drones, aircraft, birds, balloons, and other aerial vehicles —…">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<div class="topbar">
+  <button class="topbar__burger" id="burger" aria-label="Open navigation">☰ Contents</button>
+  <span class="topbar__title">World2Vision</span>
+</div>
+<div class="scrim" id="scrim"></div>
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <a class="sidebar__brand" href="index.html">
+      <span class="kicker">World<span aria-hidden="true">2</span>Vision</span>
+      <h1>Seeing the Sky</h1>
+    </a>
+    <p class="sidebar__tagline">Building perception systems that find small, fast objects in the air.</p>
+    <ol class="toc">
+    <li class="toc__part">Front matter</li>
+    <li><a class="" href="chapters/00-preface.html"><span class="n">·</span><span>Preface — how to read this</span></a></li>
+    <li class="toc__part">I · The problem & the shape</li>
+    <li><a class="" href="chapters/01-the-problem.html"><span class="n">1</span><span>Seeing small things in a big sky</span></a></li>
+    <li><a class="" href="chapters/02-the-system.html"><span class="n">2</span><span>The shape of the system</span></a></li>
+    <li class="toc__part">II · Manufacturing truth</li>
+    <li><a class="" href="chapters/03-synthetic-worlds.html"><span class="n">3</span><span>Building worlds: synthetic data</span></a></li>
+    <li><a class="" href="chapters/04-labels-from-geometry.html"><span class="n">4</span><span>Truth from geometry: labeling</span></a></li>
+    <li><a class="" href="chapters/05-datasets.html"><span class="n">5</span><span>Datasets that don't lie</span></a></li>
+    <li class="toc__part">III · Learning to see</li>
+    <li><a class="" href="chapters/06-detectors.html"><span class="n">6</span><span>The detectors</span></a></li>
+    <li><a class="" href="chapters/07-sim-to-real.html"><span class="n">7</span><span>The sim-to-real gap</span></a></li>
+    <li><a class="" href="chapters/08-tiny-objects.html"><span class="n">8</span><span>Tiny objects and tiling</span></a></li>
+    <li class="toc__part">IV · Judgment & the loop</li>
+    <li><a class="" href="chapters/09-evaluation.html"><span class="n">9</span><span>Measuring what matters</span></a></li>
+    <li><a class="" href="chapters/10-deployment.html"><span class="n">10</span><span>Off the desktop: edge & export</span></a></li>
+    <li><a class="" href="chapters/11-closing-the-loop.html"><span class="n">11</span><span>Closing the loop</span></a></li>
+    </ol>
+  </aside>
+  <main class="content">
+    <div class="reading prose">
+<header class="chap-head">
+  <span class="num">An open field guide · free to read, free to fork</span>
+  <h1>World<span aria-hidden="true">2</span>Vision <em>— teaching a machine to see the sky.</em></h1>
+  <p class="lede">A textbook for building computer-vision systems that detect and track
+  small, fast-moving objects in the air — drones, aircraft, birds, balloons, and other
+  aerial vehicles — starting from an empty repository and a camera pointed at nothing but
+  clouds. No background in machine learning is assumed. Every term is defined the first time
+  it appears.</p>
+</header>
+
+<div class="legend">
+  <span><span class="chip chip--gt"></span>what the world actually contains — ground truth</span>
+  <span><span class="chip chip--det"></span>what the model thinks it sees — a detection</span>
+</div>
+
+<p>The whole of this book lives in the gap between those two boxes. When the green box and
+the red box sit on top of each other, you have a working perception system. When they drift
+apart — a bird called a drone, a mountain ridge called an aircraft, a real object the model
+never saw at all — you have the actual subject of the field: <strong>the discipline of making
+a model's beliefs match reality, and measuring, honestly, how far apart they still are.</strong></p>
+
+<div class="kpis">
+  <div class="kpi"><span class="kpi__v">12</span><span class="kpi__k">chapters</span><span class="kpi__d">problem framing → deployed system</span></div>
+  <div class="kpi"><span class="kpi__v">~20&nbsp;px</span><span class="kpi__k">the target</span><span class="kpi__d">an aircraft two miles out</span></div>
+  <div class="kpi"><span class="kpi__v">0</span><span class="kpi__k">prior ML assumed</span><span class="kpi__d">start from first principles</span></div>
+  <div class="kpi"><span class="kpi__v">1</span><span class="kpi__k">thesis</span><span class="kpi__d">the pipeline is the product</span></div>
+</div>
+
+<h2><span class="secn">§</span>What you will build</h2>
+
+<p>By the last chapter you will understand — well enough to build one yourself — a complete
+loop that turns pixels into trustworthy detections and then improves itself:</p>
+
+<div class="figure">
+<pre>
+  simulated + real video
+          │
+     source adapters ───────────► one canonical record format
+          │                        (never read the engine's native output again)
+     versioned dataset build ────► immutable snapshot · leakage guards · license gate
+          │
+     train a detector ──────────► reproducible experiments · tracked metrics
+          │
+     evaluate honestly ─────────► the metric that matches the product, not the demo
+          │
+     failure analysis ──────────► name what breaks, feed it back to the simulator
+          │
+          └───────────────────────► export · quantize · run on the aircraft
+</pre>
+<figcaption><b>The loop.</b> Every chapter is one link in this chain. The links matter more
+than any single model — swap the detector, swap the renderer, and the loop still stands.</figcaption>
+</div>
+
+<h2><span class="secn">§</span>Who this is for</h2>
+
+<p>It is written for the engineer who can program but has never trained a model; for the ML
+practitioner who has trained models on tidy academic datasets and now faces the mess of a real
+sensor; and for the curious reader who wants to know how a small aerial vehicle is taught to
+notice another one before they meet. The running example is <strong>air-to-air detection</strong>
+— a camera on a flying platform looking for other things that fly — because it concentrates
+almost every hard problem in computer vision into a single frame: objects a dozen pixels wide,
+backgrounds full of clutter, motion, and a cost to being wrong.</p>
+
+<div class="note note--def">
+  <div class="note__label">◇ A note on scope</div>
+  <p>This is a book about <strong>perception</strong> — turning images into detections, tracks,
+  and honest uncertainty. It is not a book about what a system does <em>with</em> those
+  detections. The same techniques that let a delivery drone avoid a passing aircraft let an
+  airspace monitor count birds near a wind farm or a research platform log traffic; the
+  perception layer is shared. We draw the line at the detection and stop there, on purpose —
+  and Chapter&nbsp;2 explains why drawing that line in code, not just in prose, is itself an
+  engineering decision.</p>
+</div>
+
+<h2><span class="secn">§</span>How to read it</h2>
+
+<p>Front to back, ideally. The chapters form one arc rather than a reference manual, and each
+leans on the one before it. But the four parts are self-contained enough that you can drop into
+the one you need:</p>
+
+<ul>
+  <li><b>Part I — The problem &amp; the shape.</b> Why finding a drone in the sky is hard, and
+  the architecture that makes the rest of the book possible.</li>
+  <li><b>Part II — Manufacturing truth.</b> Where labeled data comes from when you cannot buy
+  it: building synthetic worlds, deriving labels from geometry, and versioning datasets so they
+  never quietly lie to you.</li>
+  <li><b>Part III — Learning to see.</b> Choosing and training a detector, and then the central
+  drama of the whole field — the gap between the simulator and the real sky, and the tricks that
+  close it.</li>
+  <li><b>Part IV — Judgment &amp; the loop.</b> Measuring what actually matters, getting the model
+  off your desk and onto the aircraft, and closing the loop so the system teaches itself what to
+  learn next.</li>
+</ul>
+
+<p>Throughout, the failures stay in. The chapter where a flipped camera vector silently
+mislabels an entire dataset teaches as much as any success, and honest numbers — a model that
+scores 0.02 on the wrong benchmark and 0.92 on the right one — are the point, not an
+embarrassment to be smoothed over.</p>
+
+<div class="chapnav" style="border-top:1px solid var(--border);margin-top:2.5rem;padding-top:1.6rem;">
+  <a class="prev" href="chapters/00-preface.html"><span class="dir">Start here ›</span><span class="ttl">Preface — how to read this book</span></a>
+  <a class="next" href="chapters/01-the-problem.html"><span class="dir">Chapter 1 ›</span><span class="ttl">Seeing Small Things in a Big Sky</span></a>
+</div>
+
+
+      <footer class="page-foot">
+        World2Vision · an open field guide to airborne-object perception ·
+        <a href="index.html">home</a>
+      </footer>
+    </div>
+  </main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,282 @@
+<header class="chap-head">
+  <span class="num">Part IV · Chapter 10</span>
+  <h1>Off the Desktop <em>— surviving the crossing to the edge.</em></h1>
+  <p class="lede">A model that works in the luxurious offline plane must now survive the austere
+  runtime plane on the vehicle. This chapter is the single export step that connects the two, and
+  everything that goes wrong in the crossing. On the edge the currency is milliseconds and
+  milliwatts, not mean average precision.</p>
+</header>
+
+<p>In Chapter&nbsp;2 we drew the system as <a href="02-the-system.html">two planes</a>. The
+<span class="term">offline plane</span> is where the model was born: a big GPU, unlimited time,
+gigabytes of memory, and permission to be slow if slow means accurate. The <span
+class="term">runtime plane</span> is where it has to live: a small embedded accelerator bolted to
+a flying platform, with hard limits on latency, memory, and power, and no adult supervision. Those
+two worlds meet at exactly one place — the export step — and that seam is where more good models
+die than anywhere else in the book.</p>
+
+<p>This chapter is about the crossing. Not about training a better detector; you did that already.
+About taking the detector you have and getting it, intact and honest, onto hardware that was never
+as forgiving as your workstation. Almost nothing that follows is a modeling decision. It is a
+systems decision, and treating it as anything else is how teams ship a model that scored well on
+Friday and produced garbage in flight on Monday.</p>
+
+<div class="figure">
+<pre>
+  OFFLINE PLANE                    THE CROSSING            RUNTIME PLANE
+  (GPU, hours, FP32)               (one export step)      (edge SoC, ms, INT8)
+  ┌────────────────────┐                                  ┌──────────────────────┐
+  │ trained model      │──► export ──► ONNX ──► quantize ─│► frame → preprocess   │
+  │ (PyTorch weights)  │      │          graph     │      │  → detector → tracker │
+  │ + preprocessing    │      │                    │      │  → detections → log   │
+  └────────────────────┘      ▼                    ▼      └──────────────────────┘
+                         PARITY GATE          ACCURACY GATE
+                         outputs must match   re-measure on the
+                         within tolerance     frozen benchmark
+</pre>
+<figcaption><b>One seam, two gates.</b> Everything the offline plane produced flows through a
+single narrow export. The parity gate asserts the exported graph still computes the same thing;
+the accuracy gate asserts quantization did not quietly cost you the objects you cared about.</figcaption>
+</div>
+
+<h2><span class="secn">10.1</span> The interchange boundary: ONNX</h2>
+
+<p>You train in one framework — say PyTorch — but you must not <em>deploy</em> in it. The runtime
+on the vehicle should not depend on your training framework, its Python interpreter, its version
+churn, or its assumptions about having a desktop GPU. So between training and deployment we insert
+a neutral format. The standard one is <span class="term">ONNX</span> (Open Neural Network
+Exchange): an open, framework-neutral description of a trained model's computation graph — the
+sequence of operations and weights that turn an input tensor into an output tensor, written down
+in a way that many different runtimes can read.</p>
+
+<p>You export your trained model to ONNX once, and from that point the runtime speaks only ONNX.
+This is the same move we made for <em>data</em> in Chapter&nbsp;2, where every source was
+translated into one canonical record at the door. Here every model is translated into one
+canonical graph before it crosses to the edge. ONNX is the narrow waist for models: many training
+frameworks on one side, many hardware runtimes on the other, and a single interchange format at
+the pinch point so neither side has to know about the other.</p>
+
+<div class="note note--def">
+  <div class="note__label">◇ Why a graph, not a checkpoint</div>
+  <p>A training checkpoint is a bag of weights that only means something to the exact code that
+  produced it. An ONNX graph is self-describing: it carries the operations, their connectivity,
+  and the weights together, so a runtime that has never seen your training code can execute it.
+  That self-description is exactly what lets the runtime plane stay small and framework-free — and
+  it is also what makes the next section necessary, because not every runtime supports every
+  operation the exporter chose to write down.</p>
+</div>
+
+<h2><span class="secn">10.2</span> Export parity is not free</h2>
+
+<p>Here is the assumption everyone makes and no one should: that the exported model computes the
+same function as the trained one. It often does not. Operators get approximated or substituted
+because the target lacks an exact equivalent. Tensor memory layouts differ. And most treacherous
+of all, preprocessing that was <em>implicit</em> in your training code — a resize here, a
+normalization there, buried in a data-loader nobody thinks of as part of the model — must be
+reimplemented from scratch in the runtime, by hand, often by a different person in a different
+language.</p>
+
+<p>So we make <span class="term">export parity</span> a promotion gate, exactly like the gates in
+Chapter&nbsp;2. The rule is mechanical: run the trained model and the exported model on the same
+inputs, assert their outputs match within a small numerical tolerance, and <strong>fail the
+promotion</strong> if they diverge. Not "investigate later." Fail. A model that cannot prove it
+survived its own export has not earned the right to be measured on-device, let alone flown.</p>
+
+<div class="case">
+  <div class="case__head">
+    <h3>The model that scored well and saw garbage</h3>
+    <span class="verdict verdict--crit">what broke</span>
+  </div>
+  <p>A detector passed every offline check with room to spare — strong on the real holdout, tidy
+  false-alarm rate, small objects caught. It was exported, quantized, and loaded onto the target
+  board. On-device it was a disaster: boxes in the wrong places, confident detections on empty sky,
+  real aircraft missed entirely. The weights were bit-for-bit the ones that had worked. Same model,
+  same graph. Different <em>pixels</em>.</p>
+  <p>The offline data-loader had resized frames with one interpolation method and normalized them in
+  a particular order — subtract mean, then scale — as an incidental detail nobody had written down.
+  The runtime engineer, reimplementing preprocessing in C++ against the camera path, used a
+  different resize interpolation and applied the normalization in the opposite order. Every pixel
+  entering the network was subtly wrong, so every feature the network computed was subtly wrong, and
+  a detector tuned to twenty-pixel specks has no margin for "subtly wrong."</p>
+  <div class="stats">
+    <div class="stat"><span class="v">✓</span><span class="l">weights identical</span></div>
+    <div class="stat"><span class="v">✗</span><span class="l">resize interp differed</span></div>
+    <div class="stat"><span class="v">✗</span><span class="l">normalize order flipped</span></div>
+    <div class="stat"><span class="v">0</span><span class="l">tests on preprocessing</span></div>
+  </div>
+  <p><b>The fix:</b> pin and test the <em>entire</em> preprocessing chain across the boundary, not
+  just the weights. The parity gate was extended to feed identical raw frames through both the
+  offline and the runtime preprocessing and assert the resulting tensors matched before either
+  reached the network. The boundary object is not the model — it is <em>the model plus every pixel
+  transformation in front of it.</em> Once the whole chain was pinned and tested, on-device output
+  matched offline output, and it stayed matched.</p>
+</div>
+
+<blockquote>The weights are the easy part. What crosses the boundary is the whole function — every
+resize, every normalization, every layout — and if you only test the weights you have only tested
+the easy part.</blockquote>
+
+<h2><span class="secn">10.3</span> Quantization: buying speed with precision</h2>
+
+<p>The trained model stores its weights and computes its activations in 32-bit floating point
+(FP32) — luxurious, accurate, and far heavier than the edge wants to carry. <span
+class="term">Quantization</span> is the process of converting those numbers to lower precision — most
+often 8-bit integers (INT8) — so the model is smaller in memory and dramatically faster on hardware
+that has dedicated integer acceleration. The wins are real and large: a fraction of the memory
+footprint, a multiple of the throughput, less power drawn per frame.</p>
+
+<p>It is not free either. To map a wide range of float values onto a narrow range of integers, the
+quantizer needs to know what ranges actually occur — so it needs <span
+class="term">calibration</span>: you run a batch of representative data through the model and record
+the real distribution of values at each layer, then choose the integer mapping that preserves them
+best. Calibrate on unrepresentative data and you clip or crush exactly the values that mattered.</p>
+
+<p>Because quantization changes the numbers the model computes, it can change what the model
+<em>decides</em> — and small objects, living in a handful of low-contrast pixels, are precisely the
+signals a coarse integer grid is most likely to lose. A <span class="term">quantization
+regression</span> — accuracy that silently drops after quantizing — is a real, named failure tag,
+and the only defense is to <strong>re-measure</strong>. Not assume, not eyeball. After quantizing,
+run the quantized model against the frozen benchmark from <a href="09-evaluation.html">Chapter&nbsp;9</a>
+and compare it to the FP32 baseline on the metrics that matter, especially small-object recall and
+false-alarm rate. If the regression exceeds tolerance, the model does not ship.</p>
+
+<div class="note">
+  <div class="note__label">▸ FP16: the milder middle ground</div>
+  <p>Quantization is not all-or-nothing. Between FP32 and INT8 sits 16-bit floating point (FP16),
+  which halves memory and speeds up on hardware with float16 units while staying far closer to the
+  original numerics than INT8. It is a common first step: take the easy win of FP16, measure, and
+  only push to INT8 if the latency budget still demands it. The discipline is identical — every
+  precision change is a change to the function, and every change gets re-measured on the frozen
+  benchmark.</p>
+</div>
+
+<h2><span class="secn">10.4</span> Measure on the device, not the desktop</h2>
+
+<p>Your desktop's inference speed is not a proxy for the vehicle's. Different chip, different memory
+bandwidth, different supported operators, different thermal reality. The only measurements that mean
+anything are taken on the actual target hardware, running the full pipeline — preprocess, detector,
+tracker, postprocess — not just the model's forward pass in isolation. And you do not measure the
+average. Averages hide the tail, and the tail is what drops frames.</p>
+
+<p>So we measure <span class="term">latency percentiles</span>: p50, p95, and p99 — the time under
+which 50%, 95%, and 99% of frames complete. A comfortable average with an ugly p99 means one frame
+in a hundred blows the budget, stutters the tracker, and loses the object you were following. We
+also measure throughput (frames per second), peak memory, and — the one desktops never reveal —
+<span class="term">sustained thermal behavior</span>. A chip that hits latency for ten seconds and
+then throttles under its own heat is a chip that fails in the field, where it runs for the whole
+flight, not for a demo.</p>
+
+<div class="kpis">
+  <div class="kpi"><span class="kpi__v">9 ms</span><span class="kpi__k">p50 latency</span><span class="kpi__d">full pipeline, on the target SoC</span></div>
+  <div class="kpi"><span class="kpi__v">18 ms</span><span class="kpi__k">p99 latency</span><span class="kpi__d">the tail, not the average — sets the real budget</span></div>
+  <div class="kpi"><span class="kpi__v">55 fps</span><span class="kpi__k">sustained throughput</span><span class="kpi__d">after thermal soak, not first-second peak</span></div>
+  <div class="kpi"><span class="kpi__v">180 MB</span><span class="kpi__k">peak memory</span><span class="kpi__d">must fit the accelerator's envelope</span></div>
+</div>
+
+<p>Report these numbers the way Chapter&nbsp;2's promotion gates want them: as measurements on the
+target, under sustained load, for the whole pipeline. The p99 is the honest budget. Design to it.</p>
+
+<h2><span class="secn">10.5</span> The hardware is a constraint you design around</h2>
+
+<div class="note note--warn">
+  <div class="note__label">⚠ Choose the silicon before you choose the model</div>
+  <p>The target system-on-chip or accelerator, its SDK, its <strong>supported operators</strong>,
+  its precision modes, its memory and power envelope, and the camera path that feeds it — all of
+  these should be decided <em>early</em>, because together they constrain which models you can even
+  consider. If your model uses an operator the accelerator does not implement, that op falls back to
+  the CPU — slow, power-hungry, sometimes catastrophic for latency — or forces a redesign. A
+  detector that is two percent more accurate but leans on one unsupported operator may simply be
+  undeployable. Accuracy you cannot run is not accuracy.</p>
+</div>
+
+<p>This inverts the naive order of operations. It is tempting to pick the best model on the
+benchmark and worry about hardware later. On the edge, hardware is not "later" — it is a boundary
+condition on the whole design. The supported-operator list of your accelerator is as much a part of
+your model's specification as its layer count. Read it before you commit to an architecture, not
+after you have trained one.</p>
+
+<h2><span class="secn">10.6</span> Tiling collides with the budget</h2>
+
+<p>Recall the small-object machinery from <a href="08-tiny-objects.html">Chapter&nbsp;8</a>: to keep
+twenty-pixel objects alive, we run the detector on tiles — cropped sub-frames at higher effective
+resolution — rather than on one shrunken whole image. It works. It is also the single most
+expensive thing you can do to your latency budget, because inference cost multiplies by the number
+of tiles. Nine tiles is, to first order, nine forward passes per frame.</p>
+
+<p>This is the cruel symmetry of the problem. The exact technique you need most for small objects is
+the technique that most strains the edge. So tile count, input resolution, model size, and numeric
+precision are not four separate choices — they are four knobs on a single <strong>accuracy-vs-
+latency-vs-power trade surface</strong>. Turn up tiles for recall and you spend latency and power.
+Drop to INT8 to buy it back and you risk a quantization regression on the very objects the tiles
+were protecting. Shrink the model and you may lose the small objects directly.</p>
+
+<div class="figure">
+<pre>
+     accuracy
+        ▲
+        │    ● 9 tiles, FP16      ← best recall, blows p99
+        │        ● 4 tiles, INT8  ← the shipped point
+        │            ● 1 tile, INT8
+        │                 ● downscaled, INT8  ← fast, loses small objects
+        └───────────────────────────────►  latency / power
+</pre>
+<figcaption><b>One trade surface, not four knobs.</b> Deployment is choosing a point on this
+surface that clears the accuracy gate <em>and</em> the p99 latency budget <em>and</em> the thermal
+envelope at once. Where that point sits is a systems decision, argued with device measurements —
+not a modeling preference.</figcaption>
+</div>
+
+<p>Deployment, then, is not "make the model run." It is choosing a defensible point on that surface,
+and defending it with numbers measured on the target. That is why this chapter belongs to systems
+engineering as much as to machine learning.</p>
+
+<h2><span class="secn">10.7</span> The runtime plane, briefly</h2>
+
+<p>What actually runs on the vehicle is deliberately, almost boringly simple — and that simplicity
+is a safety feature, the boundary from <a href="02-the-system.html">Chapter&nbsp;2 §2.6</a> made
+physical. The runtime path is a straight line: frame → preprocess → detector → tracker → detections
+→ log or display. It ingests images and emits detections and tracks with their confidences. It does
+not decide what to do with them. There is no branch in that line where perception becomes action,
+because the output contract has no field for action to fill.</p>
+
+<p>Keeping the runtime plane perception-only is what lets the same deployed pipeline serve a
+delivery drone's sense-and-avoid, an airport's airspace monitor, or a wildlife survey, without
+change — and it is what keeps the edge software small enough to reason about, test, and trust. The
+line is short on purpose. Every box you do not add to it is a box that cannot fail in flight.</p>
+
+<h2><span class="secn">10.8</span> Across the seam</h2>
+
+<p>The crossing has a shape now. Export through ONNX so the runtime never depends on your training
+framework. Gate on parity so the exported function — weights <em>and</em> preprocessing — matches
+the trained one bit for bit within tolerance. Quantize for the speed and memory the edge demands,
+then re-measure on the frozen benchmark so a quantization regression cannot hide. Measure latency
+percentiles, throughput, memory, and sustained thermals on the real device, across the whole
+pipeline. And choose your point on the accuracy-vs-latency-vs-power surface with the hardware's
+supported operators and the tiling budget both in view from the start.</p>
+
+<p>A model that survives all of that is a model that finally does something the offline plane never
+could: it runs in the world and generates real footage of real skies, including real failures the
+simulator never imagined. That footage is not the end of the pipeline. It is the beginning of the
+next turn of the loop — how a deployed system feeds its own failures back into the curation and
+training it came from. That is <a href="11-closing-the-loop.html">Chapter&nbsp;11</a>.</p>
+
+<div class="takeaways">
+  <span class="kicker">Takeaways</span>
+  <ul>
+    <li><b>One seam connects two planes.</b> Training's luxury and the vehicle's austerity meet at a
+    single export step; treat that crossing as a systems problem, not a modeling afterthought.</li>
+    <li><b>ONNX is the narrow waist for models.</b> Export to a neutral graph so the runtime never
+    depends on your training framework — the same discipline the canonical record gave the data.</li>
+    <li><b>Gate on export parity, including preprocessing.</b> Assert the exported model matches the
+    trained one within tolerance on identical inputs — and pin the entire pixel chain, because same
+    weights with different pixels is garbage on-device.</li>
+    <li><b>Quantize, then re-measure.</b> INT8 buys speed and memory for a usually-small accuracy
+    cost, but a quantization regression on small objects is real — verify on the frozen benchmark or
+    do not ship.</li>
+    <li><b>Measure on the device, at the tail.</b> p50/p95/p99 latency, throughput, peak memory, and
+    sustained thermals — on the target, across the full pipeline. The p99 is the honest budget.</li>
+    <li><b>Tiling, resolution, model size, and precision are one trade surface.</b> Deployment is
+    choosing a point on it that clears accuracy, latency, and thermal limits together — argued with
+    device measurements, not preference.</li>
+  </ul>
+</div>

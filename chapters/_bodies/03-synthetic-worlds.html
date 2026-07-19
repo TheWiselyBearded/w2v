@@ -1,0 +1,304 @@
+<header class="chap-head">
+  <span class="num">Part II · Chapter 3</span>
+  <h1>Building Worlds <em>— manufacturing skies a computer already understands.</em></h1>
+  <p class="lede">Real footage of small aerial objects is scarce, expensive, and legally
+  encumbered — so we render our own. This chapter is about generating the worlds: how to choose a
+  simulator, why byte-for-byte determinism is the whole discipline, and how to sample scenarios
+  that look like the hard cases from Chapter&nbsp;1 rather than the easy ones.</p>
+</header>
+
+<p>Chapter&nbsp;1 ended on a wall: the labeled data you need barely exists, and the labels are
+the real cost — a human boxing twenty-pixel specks by the million is an industrial undertaking.
+This chapter walks through the door on the far side of that wall. If you cannot buy enough labeled
+skies, you build them. And when you build a sky in a simulator, something wonderful happens to the
+labeling problem: it disappears. The computer placed every object in the scene, so it already knows
+each object's exact position, size, and identity. There is nothing to label because nothing was
+ever unknown. The labels are free, and — unlike a tired human at 2&nbsp;a.m. squinting at a
+five-pixel smudge — they are perfect.</p>
+
+<p>That is the promise. The catch, which we will spend all of Part III paying down, is that a
+rendered sky is <em>not</em> a photographed one. But before we can worry about realism, we have to
+be able to generate worlds at all, at scale, reproducibly. This chapter is about the machine that
+makes worlds; <a href="04-labels-from-geometry.html">Chapter&nbsp;4</a> is about how it turns those
+worlds into the perfect boxes just promised.</p>
+
+<h2><span class="secn">3.1</span> Choosing a simulator</h2>
+
+<p>The first real decision is which engine renders your worlds, and there is no universally correct
+answer — only trade-offs you should make on purpose. A <span class="term">simulator</span> here is
+just a piece of software that renders images of a 3D scene you describe; the candidates fall into
+three broad families.</p>
+
+<table>
+  <thead>
+    <tr><th>Engine</th><th>Strength</th><th>Cost you pay</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><b>Game engine</b> (e.g. Unity)</td>
+      <td>Fastest to start; excellent hand control over custom scenes; huge asset ecosystem.</td>
+      <td>You write more of your own annotation and export code — the engine does not hand you
+      synthetic labels.</td>
+    </tr>
+    <tr>
+      <td><b>NVIDIA Omniverse Replicator</b></td>
+      <td>Strongest programmatic domain randomization; OpenUSD scene composition; headless
+      generation; synthetic-data workflows built in.</td>
+      <td>Heavier stack and a real asset/USD learning curve before the first image comes out.</td>
+    </tr>
+    <tr>
+      <td><b>Unreal</b></td>
+      <td>Superb rendering and a deep environment/landscape ecosystem.</td>
+      <td>More custom integration to get annotation and physical scale wired up the way you need.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The pragmatic recommendation: <strong>start with one engine, and keep a second as a second
+renderer for later.</strong> You want one path working end-to-end before you spread yourself across
+two. But you also want the option of a second renderer eventually, because agreement between two
+independent engines is one of the few cheap defenses against a whole class of rendering bugs.</p>
+
+<p>Here is the architectural point that makes "keep a second renderer" painless rather than
+terrifying. Recall the narrow waist from <a href="02-the-system.html">Chapter&nbsp;2</a>: every
+source is translated into one canonical record at the door. Your simulator is just another source.
+The <span class="term">exporter</span> — the code that takes a rendered scene and emits data — emits
+the <em>canonical record</em>, regardless of which engine drew the pixels. Training never reads
+Unity's native format or Omniverse's; it reads the one record. That single commitment means adding a
+second engine is writing one more adapter, not rebuilding the pipeline.</p>
+
+<div class="note note--def">
+  <div class="note__label">◇ Exporter, not "the sim"</div>
+  <p>We are careful to separate the <em>engine</em> (which renders pixels) from the
+  <em>exporter</em> (which decides scene contents, steps the world, and writes canonical records).
+  The engine is replaceable. The exporter is where your discipline lives — the RNG, the IDs, the
+  frame loop, the provenance. When this chapter says "own your generator," it means the exporter.</p>
+</div>
+
+<h2><span class="secn">3.2</span> Determinism is the whole discipline</h2>
+
+<p>If you remember one thing from this chapter, remember this: a synthetic-data generator that is
+not reproducible is barely worth building. The entire value of "the computer knows the answer" rests
+on being able to ask the <em>same</em> question twice and get the <em>same</em> world back. We call
+this <span class="term">determinism</span>: same seed plus same generator version produces identical
+output bytes, every time, on every machine.</p>
+
+<p>Why do you care about identical <em>bytes</em>, not just "similar-looking runs"? Because
+<a href="05-datasets.html">Chapter&nbsp;5</a> identifies datasets by content hash — a dataset's name
+<em>is</em> a fingerprint of its exact contents. If regenerating the same scenario produces even
+slightly different pixels, the hash changes, the lineage breaks, and you lose the ability to
+regenerate exactly what produced a published result. Determinism is what makes a dataset a citable
+fact rather than a fading memory. Three requirements get you there.</p>
+
+<h3>1 · Own your random numbers</h3>
+<p>Do not draw from the engine's shared random-number generator. A game engine's RNG is a global
+resource that particle effects, animation, and a hundred other subsystems also pull from — so the
+draws your scene depends on shift the instant anything else in the frame changes. Instead, carry your
+own <span class="term">pseudo-random number generator</span> (a deterministic algorithm that turns a
+seed into a repeatable stream of numbers), seeded per run. A common, robust choice is to use
+<code>SplitMix64</code> to expand your seed into the state of an <code>xorshift128+</code> stream, and
+draw every sampled value from that stream alone. Nothing else in the process can perturb it.</p>
+
+<h3>2 · Content-derived stable IDs</h3>
+<p>Every object needs an identity that is the same on every run — the <code>object_id</code> the
+canonical record demands. Do not use a random or auto-incrementing counter, because those drift.
+Instead derive a <span class="term">deterministic UUID</span> (an RFC-4122 <em>version&nbsp;5</em>
+identifier, which is a hash of some input string rather than a random draw) from the tuple
+<code>(generator version, config name, seed, object index)</code>. The same object in the same
+scenario gets the same id forever — which is exactly what makes the data sequence-aware across
+regenerations, not just within a single run.</p>
+
+<h3>3 · A synchronous frame loop — no physics engine</h3>
+<p>This is the one people get wrong, and §3.5 is a whole war story about it. You must step object
+motion <em>yourself</em>, in a plain synchronous loop with a fixed time step. No physics engine. No
+coroutines, no async, no reliance on the engine's variable frame timing. Engine physics resolves
+collisions with tiny nondeterministic differences, and real frame delta-times wobble under load —
+either one silently corrupts reproducibility. You advance each object by <code>velocity × dt</code>
+with a <code>dt</code> you chose, and you render. That is all.</p>
+
+<blockquote>Same seed + same generator version = identical bytes. Anything that breaks that equality
+is a bug, no matter how good the pictures look.</blockquote>
+
+<h2><span class="secn">3.3</span> Domain randomization: a scenario is a distribution</h2>
+
+<p>A single rendered sky teaches a model almost nothing — it will memorize that one sky. The power
+of synthetic data comes from <span class="term">domain randomization</span>: instead of authoring one
+scene, you define a scenario as a <em>distribution</em> over scenes and <strong>sample</strong> it,
+recording every sampled value and the seed that produced it. Train across ten thousand samples from a
+wide distribution and the model is forced to learn what is invariant — the object — rather than the
+accidental backdrop.</p>
+
+<p>The axes you randomize are, in effect, a checklist of everything Chapter&nbsp;1 warned you about:</p>
+
+<div class="figure">
+<pre>
+  SCENARIO = a distribution you sample, logging every draw + the seed
+  ────────────────────────────────────────────────────────────────────
+  object     ▸ type · appearance · orientation
+  SIZE       ▸ pixel extent — LOG-UNIFORM, far-biased  ◄── the hard regime
+  scene      ▸ background · geography · terrain · clutter
+  weather    ▸ cloud · haze · sun angle · contrast
+  camera     ▸ pose · exposure · gain · sensor noise
+  optics     ▸ lens effects · compression artifacts · motion blur
+  motion     ▸ relative velocity · occlusion · approach dynamics (§3.4)
+  negatives  ▸ EMPTY sequences — no object at all
+</pre>
+<figcaption><b>The knobs, and one that matters most.</b> Sampling pixel size from a log-uniform,
+far-biased distribution means most targets come out small and distant — the twenty-pixel regime
+from Chapter&nbsp;1 — instead of the comfortable large objects a naive uniform draw would favor.</figcaption>
+</div>
+
+<p>Two of these deserve emphasis. First, <strong>pixel size</strong>: if you sample it uniformly you
+will fill your dataset with easy, large targets and starve the model of the hard small ones. Sample
+it <em>log-uniform and far-biased</em> so the distribution leans toward small and distant, matching
+the regime where the problem actually lives. Second, and easy to forget: deliberately include
+<span class="term">negative sequences</span> — clips with no object present at all. A detector that
+has never seen empty sky does not know what "nothing" looks like, and a monitoring system that
+invents ghosts over blank sky is the false-alarm failure from Chapter&nbsp;1 made manifest.</p>
+
+<div class="note">
+  <div class="note__label">▸ Record the draw, not just the result</div>
+  <p>Every sampled value — every size, angle, exposure, and the seed behind them — goes into the
+  scenario parameters written beside the sequence. This is what lets you later ask "which slice of
+  the distribution does the detector fail on?" and answer it, instead of guessing. The sampled
+  parameters are as much a part of the data as the pixels.</p>
+</div>
+
+<h2><span class="secn">3.4</span> Approach dynamics and the terrain you forgot</h2>
+
+<p>Static randomization gets you variety; it does not get you <em>sequences</em> that behave like
+real approaches. Two additions close that gap.</p>
+
+<p>Give the camera platform its own motion. The <span class="term">ownship</span> — your own flying
+camera — flies level along its heading at a sampled speed, so the background sweeps the way it does
+from a real moving platform, killing the background-subtraction shortcut exactly as Chapter&nbsp;1
+described. Then give some targets an <span class="term">approach probability</span>: with some chance,
+a target aims its velocity straight at the camera — a collision course — so that over the sequence it
+<em>grows</em> in the frame, three pixels now and forty pixels ten seconds from now. That growth is
+the size-change challenge from Chapter&nbsp;1, reproduced on demand. You record <code>own_speed</code>
+and the count of approaching targets as scenario parameters, so the difficulty is a logged, tunable
+quantity rather than an accident.</p>
+
+<p>One subtlety this creates: an approaching target on a near-miss will eventually overfly the
+camera and end up <em>behind</em> it. The labeler (Chapter&nbsp;4) simply drops targets that are
+behind the camera, so a near-miss degrades cleanly to "no visible object" rather than producing a
+box for something outside the field of view.</p>
+
+<div class="note note--warn">
+  <div class="note__label">⚠ The empty-sky mistake</div>
+  <p>The most common early error in this whole enterprise is generating targets against
+  <strong>empty sky only</strong>. It renders fast, it looks clean, and it quietly builds a model
+  that has never seen the ground. Real footage — especially the moment the camera tilts toward the
+  horizon — is full of terrain: ridgelines, buildings, glinting water, and ten thousand
+  high-contrast specks that each look like a small object. A model trained on blank sky treats every
+  one of them as a target. You must deliberately synthesize <strong>terrain and clutter</strong>
+  scenes. <a href="07-sim-to-real.html">Chapter&nbsp;7</a> quantifies exactly what it costs when you
+  don't — it is the single largest sim-to-real gap most teams discover, and always the hard way.</p>
+</div>
+
+<h2><span class="secn">3.5</span> War story: the seed that wasn't</h2>
+
+<div class="case">
+  <div class="case__head">
+    <h3>Two identical seeds, two different datasets</h3>
+    <span class="verdict verdict--crit">What broke: reproducibility</span>
+  </div>
+  <p>An early exporter tied object motion to the game engine's built-in physics and coroutine
+  timing. It looked reasonable — let the engine move things, let physics resolve the geometry, read
+  the positions back out each frame. Objects flew, boxes appeared, the images looked great. Everyone
+  moved on.</p>
+  <p>Then someone regenerated a scenario to reproduce a result and the dataset's content hash came
+  out <em>different</em> — same seed, same config, different bytes. Not wildly different; a handful
+  of objects sat a fraction of a pixel off. But a fraction of a pixel is a different hash, and a
+  different hash is a different dataset as far as lineage is concerned. The cause was twofold: the
+  physics solver resolved motion with tiny nondeterministic differences between runs, and the
+  engine's frame delta-time varied with system load, so <code>dt</code> was never quite the same
+  twice. Two runs that were supposed to be identical never were.</p>
+  <div class="stats">
+    <div class="stat"><span class="v">1&nbsp;seed</span><span class="l">meant to be reproducible</span></div>
+    <div class="stat"><span class="v">≠ bytes</span><span class="l">every regeneration differed</span></div>
+    <div class="stat"><span class="v">0</span><span class="l">stable lineage possible</span></div>
+    <div class="stat"><span class="v">100%</span><span class="l">of hashes drifted</span></div>
+  </div>
+  <p>The fix was to rip engine physics out entirely: step motion synchronously in a plain loop with a
+  fixed <code>dt</code>, seed a self-owned RNG (§3.2), and let the engine do nothing but render the
+  positions the exporter dictated. After that, the same seed and version produced the same bytes,
+  run after run, machine after machine. The lesson generalizes past this one bug: <em>every</em>
+  source of nondeterminism you do not own is a source of nondeterminism you cannot control.</p>
+</div>
+
+<h2><span class="secn">3.6</span> Own your assets, and run headless</h2>
+
+<p>Two operational commitments turn a clever renderer into a data factory the rest of the pipeline
+can trust.</p>
+
+<p><strong>Own every asset.</strong> If all your content is either procedurally generated or drawn
+from sources you can freely use, then the license-and-provenance gate from Chapter&nbsp;5 can cleanly
+approve every single sequence. That is not a legal footnote — it is what lets the whole dataset ship.
+Freely reusable, permissively-licensed sources give you plenty of realism without entanglement:
+public-domain and CC0 model scans and textures (for example Smithsonian Open Access CC0, NASA's
+public-domain 3D models, and CC0 texture and HDRI libraries). Attach a
+<span class="term">license/provenance sidecar</span> — a small companion file recording where every
+asset came from and under what license — to each sequence <em>at generation time</em>, not
+retroactively, so the record is never in doubt.</p>
+
+<p><strong>Run headless.</strong> The exporter must run without a display — in a batch job, a CI
+pipeline, or a cloud instance with no screen attached — driven by a <span class="term">scenario
+manifest</span> (a file describing what to generate). Headless generation is what lets you produce
+data at scale instead of babysitting a GUI. It is also what makes generation a step the offline plane
+can automate, the same way it automates training and evaluation.</p>
+
+<div class="kpis">
+  <div class="kpi"><span class="kpi__v">1 manifest</span><span class="kpi__k">every backend</span><span class="kpi__d">one logical scenario maps to each engine; unsupported fields documented</span></div>
+  <div class="kpi"><span class="kpi__v">= bytes</span><span class="kpi__k">per seed+version</span><span class="kpi__d">deterministic generation, always</span></div>
+  <div class="kpi"><span class="kpi__v">geom check</span><span class="kpi__k">agrees on boxes</span><span class="kpi__d">independent geometric verification, Ch. 4</span></div>
+  <div class="kpi"><span class="kpi__v">transfer</span><span class="kpi__k">is the metric</span><span class="kpi__d">bake-offs measure sim-to-real, not prettiness</span></div>
+</div>
+
+<h2><span class="secn">3.7</span> What "done" looks like</h2>
+
+<p>How do you know the world-builder is good enough? Not by looking at the images and admiring them.
+Prettiness is a trap — a gorgeous renderer that does not transfer to real footage is worthless, and a
+plain one that does is priceless. The acceptance criteria are concrete:</p>
+
+<ul>
+  <li>One logical <strong>scenario manifest maps to every backend</strong>, with any engine-specific
+  unsupported fields explicitly documented rather than silently ignored.</li>
+  <li>Generation is <strong>deterministic per seed and version</strong> — the byte-reproducibility of
+  §3.2, verified, not assumed.</li>
+  <li>Generated boxes <strong>agree with an independent geometric check</strong> — the exporter's
+  labels and a separate geometry computation must match (Chapter&nbsp;4).</li>
+  <li>Every sequence carries its <strong>asset licenses and generator provenance</strong>, so the
+  Chapter&nbsp;5 gate can approve it without a human hunting down sources.</li>
+  <li>A <strong>bake-off measures throughput and transfer to real data</strong> — generation speed and
+  how well a model trained on the output performs on real footage — never visual beauty.</li>
+</ul>
+
+<p>Notice what every one of these criteria has in common: none of them is about the renderer being
+impressive. They are about the generator being <em>trustworthy</em> — reproducible, verifiable,
+licensed, and measured by the only thing that matters, which is whether the worlds it builds teach a
+model to see the real one. The pipeline is the product, and the world-builder is a pipeline stage
+like any other. It earns its place by feeding clean, canonical, content-addressed records into the
+same machine everything else reads from.</p>
+
+<p>We now have worlds. In the next chapter we make them confess their contents: how the exporter
+turns a scene it fully understands into the perfect, geometry-derived boxes that make synthetic data
+worth the trouble.</p>
+
+<div class="takeaways">
+  <span class="kicker">Takeaways</span>
+  <ul>
+    <li><b>Synthetic labels are free and perfect</b> because the computer placed every object — the
+    labeling problem from Chapter&nbsp;1 evaporates when you generate the world.</li>
+    <li><b>Pick one engine, keep a second renderer for later,</b> and make the exporter emit the
+    canonical record so training never learns which engine drew the pixels.</li>
+    <li><b>Determinism is the discipline:</b> own your RNG, derive stable IDs by hashing content, and
+    step motion in a synchronous loop with no physics engine. Same seed + version = identical bytes.</li>
+    <li><b>A scenario is a distribution you sample and log.</b> Bias pixel size small, include empty
+    negatives, and deliberately synthesize terrain and clutter — empty-sky-only data is the classic
+    trap Chapter&nbsp;7 will make you pay for.</li>
+    <li><b>Own your assets and run headless.</b> Permissive sources plus a provenance sidecar let the
+    Chapter&nbsp;5 gate approve every sequence; judge the generator by transfer to real data, not by
+    how good the pictures look.</li>
+  </ul>
+</div>

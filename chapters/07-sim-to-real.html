@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The Sim-to-Real Gap — World2Vision</title>
+<meta name="description" content="Part II built abundant, perfectly-labeled synthetic skies. This chapter is the moment we point the resulting model at real footage and find out what it is actually worth. The…">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<div class="topbar">
+  <button class="topbar__burger" id="burger" aria-label="Open navigation">☰ Contents</button>
+  <span class="topbar__title">The Sim-to-Real Gap</span>
+</div>
+<div class="scrim" id="scrim"></div>
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <a class="sidebar__brand" href="../index.html">
+      <span class="kicker">World<span aria-hidden="true">2</span>Vision</span>
+      <h1>Seeing the Sky</h1>
+    </a>
+    <p class="sidebar__tagline">Building perception systems that find small, fast objects in the air.</p>
+    <ol class="toc">
+    <li class="toc__part">Front matter</li>
+    <li><a class="" href="00-preface.html"><span class="n">·</span><span>Preface — how to read this</span></a></li>
+    <li class="toc__part">I · The problem & the shape</li>
+    <li><a class="" href="01-the-problem.html"><span class="n">1</span><span>Seeing small things in a big sky</span></a></li>
+    <li><a class="" href="02-the-system.html"><span class="n">2</span><span>The shape of the system</span></a></li>
+    <li class="toc__part">II · Manufacturing truth</li>
+    <li><a class="" href="03-synthetic-worlds.html"><span class="n">3</span><span>Building worlds: synthetic data</span></a></li>
+    <li><a class="" href="04-labels-from-geometry.html"><span class="n">4</span><span>Truth from geometry: labeling</span></a></li>
+    <li><a class="" href="05-datasets.html"><span class="n">5</span><span>Datasets that don't lie</span></a></li>
+    <li class="toc__part">III · Learning to see</li>
+    <li><a class="" href="06-detectors.html"><span class="n">6</span><span>The detectors</span></a></li>
+    <li><a class="active" href="07-sim-to-real.html"><span class="n">7</span><span>The sim-to-real gap</span></a></li>
+    <li><a class="" href="08-tiny-objects.html"><span class="n">8</span><span>Tiny objects and tiling</span></a></li>
+    <li class="toc__part">IV · Judgment & the loop</li>
+    <li><a class="" href="09-evaluation.html"><span class="n">9</span><span>Measuring what matters</span></a></li>
+    <li><a class="" href="10-deployment.html"><span class="n">10</span><span>Off the desktop: edge & export</span></a></li>
+    <li><a class="" href="11-closing-the-loop.html"><span class="n">11</span><span>Closing the loop</span></a></li>
+    </ol>
+  </aside>
+  <main class="content">
+    <div class="reading prose">
+<header class="chap-head">
+  <span class="num">Part III · Chapter 7</span>
+  <h1>The Sim-to-Real Gap <em>— where the reckoning finally comes due.</em></h1>
+  <p class="lede">Part II built abundant, perfectly-labeled synthetic skies. This chapter is the
+  moment we point the resulting model at real footage and find out what it is actually worth. The
+  first honest number is brutal — and it is the most important number in the book, because it is
+  the one everything after it improves against.</p>
+</header>
+
+<p>Everything until now has been construction. We built a canonical record, a simulator, a way to
+turn geometry into labels, and a detector that scores beautifully on the worlds we rendered. It is
+a satisfying place to be, and it is a trap. A model that works on synthetic imagery has not been
+shown to work; it has been shown to work <em>on synthetic imagery</em>. Those are different claims,
+and the distance between them is the subject of this chapter and the hardest, most important work
+in the book.</p>
+
+<p>Give the distance its name. The <span class="term">sim-to-real gap</span> — also called the
+<span class="term">domain gap</span> — is the drop in performance you suffer when a model trained on
+one distribution of images (simulated) is asked to perform on a different distribution (real). The
+model has not gotten worse; the world has changed underneath it. The pixels it learned to trust are
+not the pixels it now sees, and it fails in ways that are, at first, mysterious. The rest of this
+chapter is about making them un-mysterious: measure the gap, diagnose its causes, and close it.</p>
+
+<h2><span class="secn">7.1</span> You cannot fix what you refuse to measure</h2>
+
+<p>The temptation, when you have poured months into a synthetic pipeline, is to keep admiring the
+synthetic scores. Resist it. The only number that matters is performance on <strong>real
+imagery the model has never seen</strong>. So we do the uncomfortable thing first: train on
+synthetic data (plus whatever small amount of real data we have), then evaluate on a held-out set
+of real flights that never touched training. This is the <span class="term">real holdout</span> —
+the gate from Chapter&nbsp;2 that exists precisely because someone was once fooled by brilliant
+synthetic scores that evaporated on real footage.</p>
+
+<p>Here is what that first honest evaluation produced in one build. The headline metric is
+<span class="term">mean average precision</span> (mAP): a single number from 0 to 1 summarizing how
+well the detector's boxes match the truth across confidence thresholds. On synthetic data it looked
+excellent. On real footage:</p>
+
+<div class="kpis">
+  <div class="kpi"><span class="kpi__v">0.021</span><span class="kpi__k">mAP on real footage</span><span class="kpi__d">essentially not working — the honest baseline</span></div>
+  <div class="kpi"><span class="kpi__v">~0.9</span><span class="kpi__k">on synthetic</span><span class="kpi__d">the score that fooled everyone into feeling done</span></div>
+  <div class="kpi"><span class="kpi__v">≈40×</span><span class="kpi__k">the illusion</span><span class="kpi__d">how much better it looked than it was</span></div>
+  <div class="kpi"><span class="kpi__v">0.000</span><span class="kpi__k">of a target reached</span><span class="kpi__d">the number to beat, not the number to mourn</span></div>
+</div>
+
+<p>Twenty-one thousandths. On real footage the model was, for all practical purposes, blind. It is
+tempting to read that as catastrophic failure — months of work, and the thing does not see. Read it
+the other way. That 0.021 is not a verdict; it is a <strong>baseline</strong>. It is the first point
+on a curve you are about to push upward, and you could not have started climbing until you knew where
+the ground was. A team that never runs this evaluation ships the 0.9 and discovers the 0.021 in the
+field, where it costs far more than pride.</p>
+
+<blockquote>A brutal honest number is worth more than a beautiful dishonest one. The synthetic
+score told you the pipeline runs; the real score tells you whether it works.</blockquote>
+
+<h2><span class="secn">7.2</span> Four reasons the sky was a stranger</h2>
+
+<p>A single scalar tells you that you have a problem; it does not tell you what the problem is. The
+next move is diagnosis — pulling up the actual failure images and asking, frame by frame, why the
+model is wrong. In this build the 0.021 was not one bug. It was four distinct distribution
+mismatches stacked on top of one another, and each had a different fix. Lamenting the gap is
+useless. Decomposing it is everything.</p>
+
+<div class="figure">
+<pre>
+  SYNTHETIC (what it trained on)        REAL (what it was tested on)
+  ┌───────────────────────────┐         ┌───────────────────────────┐
+  │        ·        (RGB)      │         │  ╱╲___    building   (gray)│
+  │                           │         │ ╱  ridgeline ╲___/╲        │
+  │   empty sky, one target   │         │ ▓▓ terrain ▓▓  ·  ▓ noise  │
+  │   crisp, full color        │         │ downscaled, grainy, gray   │
+  └───────────────────────────┘         └───────────────────────────┘
+     clean, labeled, generous              cluttered, huge, then shrunk
+</pre>
+<figcaption><b>Two different worlds wearing the same job title.</b> Nearly every axis along which
+these two images differ is an axis the model silently learned the wrong thing about. The gap is the
+sum of those differences.</figcaption>
+</div>
+
+<table>
+  <thead>
+    <tr><th>Root cause</th><th>Symptom on real footage</th><th>Fix</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><b>No ground clutter.</b> Synthetic scenes were empty sky; real takeoff and low-altitude
+      frames are full of terrain.</td>
+      <td>A false-positive storm. The model never learned that a ridgeline <em>isn't</em> an object,
+      so it flags mountainside rocks, buildings, and treelines by the dozen.</td>
+      <td>Render terrain, horizons, and ground clutter into the synthetic worlds — the exact warning
+      raised back in <a href="03-synthetic-worlds.html">Chapter&nbsp;3</a>. Teach "not an object" on
+      purpose.</td>
+    </tr>
+    <tr>
+      <td><b>Resolution mismatch.</b> Real sensor frames are enormous (e.g. 2448&times;2048) and get
+      downscaled before the network sees them.</td>
+      <td>Tiny objects vanish. Downscaling a 2448-wide frame to 560&nbsp;px shrinks a 20-px target to
+      about 4&nbsp;px — below the size at which the detector can respond at all.</td>
+      <td>Stop downscaling the object away. Feed the network native-resolution <em>tiles</em> instead
+      of a shrunken whole frame — the full machinery of <a href="08-tiny-objects.html">Chapter&nbsp;8</a>.</td>
+    </tr>
+    <tr>
+      <td><b>Class / label mismatch.</b> Synthetic labels used specific classes; the real dataset
+      labeled most objects as one generic "unknown / airborne" class.</td>
+      <td>The metric punished correct work. A perfectly localized box was scored <em>wrong</em>
+      because its predicted class didn't match a label that never distinguished classes anyway.</td>
+      <td>Evaluate <strong>class-agnostic</strong> when the taxonomies don't line up: ask "did you
+      find the object at all," not "did you name it." (More in <a href="09-evaluation.html">Chapter&nbsp;9</a>.)</td>
+    </tr>
+    <tr>
+      <td><b>Appearance mismatch.</b> Real footage was grayscale, noisy, and compressed; synthetic
+      was clean RGB.</td>
+      <td>The model keyed on cues that don't exist in real frames — color, crisp edges — and
+      stumbled on sensor grain and compression blocks it had never encountered.</td>
+      <td>Augment training to cover the real look: randomly convert to grayscale, add sensor noise,
+      blur, and compression artifacts so the training distribution reaches into the real one.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Notice what this table is not: a list of things the model did badly. It is a list of things the
+<em>data</em> failed to represent. Three of the four fixes change what enters the pipeline — render
+clutter, tile at native resolution, augment appearance — and the fourth changes how you measure. None
+of them touches the network architecture. That is the thesis of the book arriving exactly on
+schedule: the pipeline is the product, and the gap lives in the pipeline, not the model.</p>
+
+<div class="note note--warn">
+  <div class="note__label">⚠ The false-positive storm is the loudest failure, not the deepest</div>
+  <p>When terrain enters the frame, a clutter-naive model can invent dozens of detections per frame.
+  It is dramatic, and it dominates the first look at the failure images. But it is also the
+  <em>easiest</em> of the four to fix — you simply have to show the model terrain during training.
+  Do not let the loudest symptom convince you it is the whole disease. The resolution and
+  distribution problems below are quieter and cost more to close.</p>
+</div>
+
+<h2><span class="secn">7.3</span> The deepest cut: train and eval must match</h2>
+
+<p>The four causes above are mismatches between synthetic and real. There is a subtler, more
+expensive mismatch that lives entirely inside your own pipeline, and it is worth stopping on because
+it is the kind of mistake a <em>competent</em> team makes precisely because they are trying to do the
+right thing.</p>
+
+<div class="case">
+  <div class="case__head">
+    <h3>The redesign that trained on one world and was graded on another</h3>
+    <span class="verdict verdict--crit">what broke</span>
+  </div>
+  <p>A promising redesign set out to solve the small-object problem the honest way: instead of feeding
+  the network downscaled whole frames, it trained on tight <strong>crops</strong> taken right around
+  the objects, so every training image was mostly target and the tiny-object signal was preserved. On
+  paper, exactly right. But the evaluation was left as it had always been: downscaled <em>whole
+  frames</em>. So the model now trained on one distribution — zoomed-in crops, dense with objects — and
+  was judged on a completely different one — shrunken full scenes, mostly empty sky. It had never, not
+  once, seen at training time the kind of image it was being graded on.</p>
+  <p>The result was a slow-motion disappointment. Validation performance limped along, peaked somewhere
+  around <strong>0.010</strong> mAP, and the run was killed early as a clear dead end. The instinct in
+  the room was to blame the model — wrong architecture, wrong hyperparameters, wrong idea. All of that
+  was innocent. The model was fine. What was broken was that <em>what it learned from and what it was
+  measured on were no longer the same thing.</em> A student drilled on one exam and tested on another
+  fails, and the failure says nothing about the student.</p>
+  <div class="stats">
+    <div class="stat"><span class="v">crops</span><span class="l">what it trained on</span></div>
+    <div class="stat"><span class="v">whole frames</span><span class="l">what it was graded on</span></div>
+    <div class="stat"><span class="v">~0.010</span><span class="l">where it peaked before it was killed</span></div>
+    <div class="stat"><span class="v">0</span><span class="l">bugs in the model itself</span></div>
+  </div>
+</div>
+
+<p>The fix is not a better model; it is a matched distribution. Make evaluation use the <strong>same
+tiling the deployment will use</strong>: a deterministic, full-coverage grid of tiles cut at native
+resolution — and, crucially, <em>keep the empty tiles</em>. It is tempting to drop tiles that contain
+no object, because they seem like wasted computation, but the empty tiles are where the model learns
+and is tested on its ability to say "nothing here." Discard them and you both starve training of
+negatives and inflate your score by never grading the model on the clutter it will actually face.
+This matched-distribution, full-grid evaluation is the SAHI-style approach we build in
+<a href="08-tiny-objects.html">Chapter&nbsp;8</a> and measure honestly in
+<a href="09-evaluation.html">Chapter&nbsp;9</a>.</p>
+
+<blockquote>Train and evaluation data must be drawn from the same distribution — and that distribution
+should be the one you will actually deploy in. Optimize anything else and you will optimize a fiction.</blockquote>
+
+<p>This is the same principle that governed the whole architecture in Chapter&nbsp;2, now aimed at the
+experiment itself: decide what "the real task" looks like, and make every stage — training, validation,
+and the deployed runtime — agree on that one shape.</p>
+
+<h2><span class="secn">7.4</span> What actually closed the gap: more world, not more model</h2>
+
+<p>With the four causes diagnosed and the train/eval distributions aligned, we had a system that
+<em>could</em> improve. The question was which lever moved it most. We tried the usual suspects —
+bigger backbones, longer schedules, cleverer losses — and they helped at the margins. But the single
+biggest lever, by a wide margin, was embarrassingly simple: <strong>more real data, and more
+<em>diverse</em> real data</strong>.</p>
+
+<p>Scaling the real training set from a couple dozen flights to a few hundred flights — the same model,
+the same recipe, just a wider and more varied slice of the actual world — moved the numbers like nothing
+else did:</p>
+
+<table>
+  <thead>
+    <tr><th>Metric</th><th class="tnum">~2 dozen flights</th><th class="tnum">~few hundred flights</th><th>Change</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>AP@50 (overall)</td><td class="tnum">0.775</td><td class="tnum">0.857</td><td>+0.082</td></tr>
+    <tr><td>Small-object recall (16–32&nbsp;px bin)</td><td class="tnum">—</td><td class="tnum">—</td><td>+0.16</td></tr>
+    <tr><td>Overfitting at this diversity</td><td>—</td><td>none observed</td><td>no cliff</td></tr>
+  </tbody>
+</table>
+
+<p>Read the last row carefully, because it is the surprising one. More data usually buys you diminishing
+returns and eventually an overfitting cliff, where the model starts memorizing and generalization
+falls. At this level of <em>diversity</em>, no such cliff appeared — the model kept getting better as
+the world it saw got wider. Diversity, not just volume, is what buys generalization: two hundred flights
+that are all the same clear afternoon over the same valley teach less than fifty flights across weather,
+terrain, light, and sensor.</p>
+
+<p>And notice, once more, what did the work. The architecture between the 0.775 build and the 0.857
+build was essentially unchanged. The <strong>data changed</strong>. This is the entire argument of the
+book compressed into two numbers: you do not climb the sim-to-real gap primarily by inventing a better
+detector. You climb it by feeding a competent detector a richer, more honest, more varied picture of
+the world it will actually fly in.</p>
+
+<div class="note note--good">
+  <div class="note__label">✓ The lever with the best return</div>
+  <p>Before you spend a week on a novel architecture, ask whether a week spent collecting and curating
+  more diverse real footage would move the number further. In this campaign it almost always would. The
+  model is the cheap part; the data is the product.</p>
+</div>
+
+<h2><span class="secn">7.5</span> Overfitting to synthetic, and the cheapest insurance against it</h2>
+
+<p>There is a specific failure mode that stalks any training mix heavy on synthetic data. Because
+synthetic imagery is clean and internally consistent, a network can <em>memorize its quirks</em> fast —
+the particular way the renderer draws an edge, the exact statistics of its noise-free sky — and briefly
+look excellent, before that memorization actively hurts it on real frames. In one run, validation
+performance peaked at <strong>epoch 2 of 12</strong> and then declined for the remaining ten epochs as
+the model overfit the synthetic look. Left to run to the end, the last checkpoint was worse than one it
+had passed through early.</p>
+
+<p>There are two responses, and you want both.</p>
+
+<p>First, <strong>promote the best checkpoint, not the last one.</strong> Track validation on the real
+holdout every epoch and keep the weights from the epoch that scored highest. If the model diverges later,
+that divergence costs you nothing — you already saved the good one. This is cheap, universal insurance,
+and it should be on by default.</p>
+
+<p>Second — and this is the real fix — <strong>address the mix.</strong> Train fewer epochs, and
+rebalance the synthetic-to-real ratio so the model is not given the time or the incentive to memorize
+synthetic quirks in the first place. Best-checkpoint promotion makes overfitting <em>cheap to tolerate</em>;
+it does not make it go away. If your best checkpoint is always epoch 2, that is not a happy accident to
+exploit forever — it is the pipeline telling you the training mix is wrong.</p>
+
+<div class="note note--crit">
+  <div class="note__label">✕ A peak at epoch 2 is a symptom, not a strategy</div>
+  <p>If validation reliably peaks almost immediately and then falls, resist the urge to simply set
+  <code>epochs=2</code> and call it solved. That treats the thermometer instead of the fever. The early
+  peak means the synthetic-heavy mix is teaching the model to memorize rather than generalize; fix the
+  mix, and the peak moves to where it belongs.</p>
+</div>
+
+<h2><span class="secn">7.6</span> Pilot first: never bet a night on an unvalidated idea</h2>
+
+<p>Everything in this chapter — rendering clutter, native-resolution tiling, class-agnostic evaluation,
+appearance augmentation, distribution matching, data scaling — is a change to the pipeline, and every
+change is a hypothesis that could be wrong. A full training run is expensive: hours of GPU time, often an
+overnight commitment, and a full day lost if the idea was flawed. Discovering at 9&nbsp;a.m. that last
+night's redesign trained on the wrong distribution is a bad way to spend a day.</p>
+
+<p>So before committing to the expensive run, run a cheap <span class="term">pilot</span>: a small,
+fast dry run that validates the direction before you scale it. Hash-gate a subsample of the data — say
+15%, selected deterministically by hashing each sample's identifier so the subset is stable and
+reproducible — and train a few epochs, about an hour, with <strong>identical data and evaluation
+settings</strong> to the full run. The pilot will not give you your final number, but it will tell you
+whether the curve is pointing the right way. Only scale what the pilot shows is working; kill what it
+shows is not, before it costs you a night.</p>
+
+<div class="figure">
+<pre>
+  IDEA ──► PILOT ────────► does the curve point up?
+           15% of data          │            │
+           ~few epochs         yes           no
+           ~1 hour              │            │
+           SAME data/eval       ▼            ▼
+                          FULL RUN       kill it now,
+                          overnight      change the idea
+                          on 100%        (cost: 1 hour)
+</pre>
+<figcaption><b>An hour to protect a night.</b> The pilot must share the full run's exact data and
+evaluation settings — a pilot that changes the distribution answers a different question than the one
+you are asking, and re-creates the very mismatch of §7.3 at small scale.</figcaption>
+</div>
+
+<p>The pilot-first habit is the experimental discipline that makes the rest of this chapter affordable.
+The gap is closed by many small, honest experiments, and you can only afford many experiments if each
+one is cheap to be wrong about.</p>
+
+<h2><span class="secn">7.7</span> Where the gap stands</h2>
+
+<p>We began this chapter at 0.021 — a model that scored beautifully on synthetic imagery and was, on
+real footage, effectively blind. We did not close that gap with a better network. We closed it by
+measuring the gap honestly, decomposing it into four nameable causes with four different fixes, aligning
+what we trained on with what we deployed and measured, and then — above all — feeding the model a
+wider, more diverse picture of the real world. The model barely changed. The data, and the discipline
+around it, changed completely. That is the whole book in one chapter.</p>
+
+<p>Two threads ran through everything here and are owed their own chapters. The tiny-object machinery
+this chapter kept deferring to — tiling, native resolution, full-coverage grids that keep their empty
+tiles — is the subject of <a href="08-tiny-objects.html">Chapter&nbsp;8</a>. And the honest measurement
+that made every number in this chapter trustworthy — class-agnostic evaluation, small-object bins,
+false-alarm rate, matched distributions — is the subject of <a href="09-evaluation.html">Chapter&nbsp;9</a>,
+where we learn how measuring the wrong thing can make a good detector look broken and a broken one look
+fine.</p>
+
+<div class="takeaways">
+  <span class="kicker">Takeaways</span>
+  <ul>
+    <li><b>Measure before you fix.</b> The first honest real-footage number — 0.021 mAP here — is not a
+    failure but a baseline. You cannot close a gap you have never quantified.</li>
+    <li><b>Decompose the gap into causes.</b> Ours was four stacked mismatches — no ground clutter,
+    resolution downscaling, class/label mismatch, and appearance — each with its own fix, three of them
+    in the data and one in the metric.</li>
+    <li><b>Train and eval must share a distribution — the deployed one.</b> A redesign that trained on
+    crops but was graded on whole frames peaked at ~0.010 and was killed; the model was innocent, the
+    mismatch was fatal. Use the same tiling everywhere, and keep the empty tiles.</li>
+    <li><b>More diverse real data is the biggest lever.</b> Scaling from a couple dozen to a few hundred
+    flights moved AP@50 from 0.775 to 0.857 with no overfitting cliff — the model barely changed, the
+    data did.</li>
+    <li><b>Promote the best checkpoint and fix the mix; pilot before you commit.</b> Best-checkpoint
+    promotion makes synthetic overfitting cheap to tolerate but never fixes it; a 15%, one-hour pilot with
+    identical settings protects an overnight run from a wrong idea.</li>
+  </ul>
+</div>
+
+      <nav class="chapnav"><a class="prev" href="06-detectors.html"><span class="dir">‹ Previous</span><span class="ttl">The Detectors</span></a><a class="next" href="08-tiny-objects.html"><span class="dir">Next ›</span><span class="ttl">Tiny Objects & Tiling</span></a></nav>
+      <footer class="page-foot">
+        World2Vision · an open field guide to airborne-object perception ·
+        <a href="../index.html">home</a>
+      </footer>
+    </div>
+  </main>
+</div>
+<script src="../assets/site.js"></script>
+</body>
+</html>
