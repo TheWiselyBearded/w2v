@@ -90,11 +90,29 @@ loop that turns pixels into trustworthy detections and then improves itself:</p>
           │
      failure analysis ──────────► name what breaks, feed it back to the simulator
           │
-          └───────────────────────► export · quantize · run on the aircraft
+          └───────────────────────► export · quantize · compile · run on the aircraft
 </pre>
 <figcaption><b>The loop.</b> Every chapter is one link in this chain. The links matter more
 than any single model — swap the detector, swap the renderer, and the loop still stands.</figcaption>
 </div>
+
+<h2><span class="secn">§</span>The build behind the book</h2>
+
+<p>The numbers in these chapters are not invented for pedagogy. They come from one real build of
+this exact loop — its wins, its dead ends, and its still-open items, all reported as they landed.
+Where the build currently stands:</p>
+
+<div class="kpis">
+  <div class="kpi"><span class="kpi__v">0.876</span><span class="kpi__k">detector AP@50</span><span class="kpi__d">tiled validation, plain labels — Ch. 6 &amp; 7</span></div>
+  <div class="kpi"><span class="kpi__v">0.922</span><span class="kpi__k">whole-frame AP@50</span><span class="kpi__d">the sliced-inference product metric — Ch. 8</span></div>
+  <div class="kpi"><span class="kpi__v">927&nbsp;fps</span><span class="kpi__k">compiled FP16 engine</span><span class="kpi__d">~1 ms per tile, task-identical accuracy — Ch. 10</span></div>
+  <div class="kpi"><span class="kpi__v">−0.002</span><span class="kpi__k">AP cost of INT8</span><span class="kpi__d">at 3.9× smaller — quantization, measured — Ch. 10</span></div>
+</div>
+
+<p>The failures are reported with the same precision: a sim-to-real baseline of 0.021 that took
+four separate diagnoses to climb out of (Ch.&nbsp;7), a distillation pilot that moved the needle by
++0.001 and was retired in ninety minutes (Ch.&nbsp;11), and a tracker whose first end-to-end run
+gave one aircraft six names (Ch.&nbsp;11). They stay in because they are the curriculum.</p>
 
 <h2><span class="secn">§</span>Who this is for</h2>
 

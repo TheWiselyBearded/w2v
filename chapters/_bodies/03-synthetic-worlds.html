@@ -255,7 +255,57 @@ can automate, the same way it automates training and evaluation.</p>
   <div class="kpi"><span class="kpi__v">transfer</span><span class="kpi__k">is the metric</span><span class="kpi__d">bake-offs measure sim-to-real, not prettiness</span></div>
 </div>
 
-<h2><span class="secn">3.7</span> What "done" looks like</h2>
+<h2><span class="secn">3.7</span> Build the blockout, then dress the set</h2>
+
+<p>Everything so far treats the engine's pixels as the finished product. They are not — and the
+reason previews Part III's central drama. A game engine is superb at <em>structure</em>: geometry,
+motion, occlusion, and the perfect labels that fall out of them. It is mediocre at <em>surface
+statistics</em> — the grain of real terrain, atmospheric scattering, the particular character of a
+real sensor. And it is exactly those surface statistics, especially in the background, that decide
+whether a model trained on rendered skies survives contact with photographed ones.</p>
+
+<p>So borrow a trick from film production. A film set is built twice: first the
+<span class="term">blockout</span> — plain geometry that fixes where everything is and how it moves —
+and then the <span class="term">set dressing</span> that makes it look real. The engine renders the
+blockout. Then a second stage runs a <span class="term">generative image-to-image pass</span> over
+each rendered frame: a diffusion model, conditioned on the rendered image at a deliberately low
+edit strength, repaints textures and atmosphere while leaving the scene's layout pinned. The
+geometry the labels were computed from does not move; the surfaces stop looking like a video game.</p>
+
+<p>Left alone, a generative model will happily hallucinate — and a hallucinated pixel inside a
+bounding box is a corrupted label. Two commitments make the pass label-safe by construction:</p>
+
+<ul>
+  <li><strong>Low edit strength.</strong> The denoising strength stays low (this build uses 0.35),
+  so the model is only allowed to repaint surface statistics, not invent or move objects. Realism
+  comes from the background, which is also where the false-positive gap lives.</li>
+  <li><strong>Target preservation.</strong> After enhancement, the <em>original rendered pixels
+  inside every annotation box</em> — padded slightly, with a feathered edge — are composited back
+  over the enhanced frame. The pixels under each label are exactly the pixels the label was computed
+  from, unconditionally. The generative model never gets a vote on the object.</li>
+</ul>
+
+<p>And the discipline of this chapter does not relax just because a neural network joined the
+render path. The per-frame seed is derived by hashing the source frame's content with a fixed salt,
+so the same input sequence and parameters reproduce the same edits. The enhanced output is written
+as a <strong>new derived sequence</strong> with its own deterministic identity — never overwriting
+its source — carrying a provenance block that records the model, parameters, and the lineage back to
+the raw render. It then enters the pipeline through the same door as any other sequence: the
+canonical-record adapter. Training never learns that a diffusion model touched the pixels, the same
+way it never learns which engine drew them.</p>
+
+<div class="note note--warn">
+  <div class="note__label">⚠ The generative model is an asset with a license</div>
+  <p>The enhancement model's weights are now part of your data's provenance, exactly like a texture
+  or a 3D scan — so they go into the license sidecar and through the Chapter&nbsp;5 gate. Choose
+  weights under a genuinely permissive license: several popular image models ship under
+  use-restricted licenses that a fail-closed license gate will (correctly) reject. And treat
+  API-hosted image models — which offer no edit-strength control and no seed — as a sketchpad for
+  eyeballing whether the idea works, not as a production path. The production path is a local model
+  with a strength knob, a seed, and a license you have read.</p>
+</div>
+
+<h2><span class="secn">3.8</span> What "done" looks like</h2>
 
 <p>How do you know the world-builder is good enough? Not by looking at the images and admiring them.
 Prettiness is a trap — a gorgeous renderer that does not transfer to real footage is worthless, and a
@@ -300,5 +350,9 @@ worth the trouble.</p>
     <li><b>Own your assets and run headless.</b> Permissive sources plus a provenance sidecar let the
     Chapter&nbsp;5 gate approve every sequence; judge the generator by transfer to real data, not by
     how good the pictures look.</li>
+    <li><b>Blockout, then set dressing.</b> A low-strength generative pass can repaint the engine's
+    surface statistics toward realism — but only with the labeled object pixels composited back
+    untouched, a content-hashed seed, a new derived sequence identity, and the model's own license in
+    the sidecar. The generative model dresses the set; it never rebuilds it.</li>
   </ul>
 </div>

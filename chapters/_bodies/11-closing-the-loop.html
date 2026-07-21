@@ -208,6 +208,35 @@ time axis the detector threw away.</p>
   tracking metric will tell you.</p>
 </div>
 
+<div class="case">
+  <div class="case__head">
+    <h3>First light on the tracker</h3>
+    <span class="verdict verdict--warn">wiring proven · tuning open</span>
+  </div>
+  <p>Here is what those metrics said the first time this build's detect&nbsp;→&nbsp;track&nbsp;→&nbsp;score
+  chain ran end to end, on a short real sequence with a single true object. Per-frame recall was
+  <strong>0.87</strong> — the object was being followed. The false-track rate was
+  <strong>0.0</strong> — every predicted track touched the true object; there were no phantoms. And
+  yet the tracker reported <strong>six tracks and five identity switches</strong> for that one
+  object. One aircraft, six names.</p>
+  <div class="stats">
+    <div class="stat"><span class="v">0.87</span><span class="l">frame recall — it follows the object</span></div>
+    <div class="stat"><span class="v">0.0</span><span class="l">false-track rate — no phantoms</span></div>
+    <div class="stat"><span class="v">6</span><span class="l">tracks for one true object</span></div>
+    <div class="stat"><span class="v">5</span><span class="l">identity switches</span></div>
+  </div>
+  <p>Read as a single blended score, this run is simply "bad." Read as separate metrics, it is a
+  precise diagnosis: the failure is pure <strong>fragmentation</strong> — and its cause was the
+  harness, not the tracker. The tracker required a track to survive three consecutive frames before
+  being trusted, on a smoke clip only fifteen frames long; every time the object coasted through a
+  missed detection, the tracker spawned a fresh tentative identity that never had time to mature.
+  The numbers are diagnostic, not a verdict, and the ledger records exactly that: the wiring is
+  proven, the tuning — coast time, match threshold, maturity age, on full-length sequences — is
+  open. One habit worth stealing: render the tracks as an overlay video, one colour per identity.
+  Fragmentation that hides in a table is unmissable as a colour that flickers six times along one
+  smooth trajectory.</p>
+</div>
+
 <h2><span class="secn">11.6</span> Transfer and distillation: teaching the small model</h2>
 
 <p>One more strand closes back on Chapter&nbsp;10. The edge model that has to run on the vehicle is
@@ -225,6 +254,53 @@ It pairs naturally with the transfer learning of <a href="06-detectors.html">Cha
 the two are worth keeping distinct: transfer learning reused <em>general</em> features learned on some
 vast unrelated corpus; distillation reuses <em>your own</em> big model's hard-won judgment about your
 specific sky. One borrows from the world; the other bequeaths from your best work to your fastest.</p>
+
+<p>That is the theory, and it is genuinely sound. Now watch what happened when this build tried it —
+because the outcome is a better lesson than a success would have been.</p>
+
+<div class="case">
+  <div class="case__head">
+    <h3>Distillation, measured: two cheap negatives</h3>
+    <span class="verdict verdict--warn">method sound · premise false — for this data</span>
+  </div>
+  <p>The pilot was a matched A/B: same data fraction, same epochs, same seed and architecture; the
+  <em>only</em> difference was folding the teacher's confident detections into the student's training
+  targets. Result: <strong>0.797 without distillation, 0.798 with</strong>. A wash. The postmortem
+  found two independent causes, each fatal on its own.</p>
+  <p>First, <strong>the intervention was almost empty.</strong> Nearly every confident teacher box
+  landed on an object the ground truth already labeled, and was deduplicated away by design — across
+  twenty-three thousand training crops, the teacher contributed 256 new boxes, a 1.8% change. The
+  premise that the teacher would recover objects the labels missed did not hold on this data. Second,
+  <strong>the teacher was weaker than the student.</strong> The student's own ceiling, trained longer
+  on plain labels, was 0.876; the teacher stood at 0.857. You cannot distill a stronger student from
+  a weaker teacher — the experiment was doomed by construction, and nobody had checked.</p>
+  <p>The obvious fix — train the teacher longer so it outranks the student — got its own run, under a
+  pre-committed kill rule: stop after three evaluations without improvement. The teacher
+  <em>declined monotonically</em> from its very first checkpoint. It was not under-trained; it was
+  <strong>capacity-limited</strong> on this data, its best already behind it. The run was killed on
+  schedule, and teacher-based distillation was closed out on this project — in the trial log, in
+  writing, with the numbers.</p>
+  <div class="stats">
+    <div class="stat"><span class="v">+0.001</span><span class="l">AP@50 from distillation — a wash</span></div>
+    <div class="stat"><span class="v">+1.8%</span><span class="l">annotations actually added</span></div>
+    <div class="stat"><span class="v">0.857&nbsp;&lt;&nbsp;0.876</span><span class="l">teacher below student's ceiling</span></div>
+    <div class="stat"><span class="v">~16&nbsp;h</span><span class="l">GPU time saved by pilots + kill rule</span></div>
+  </div>
+  <p><b>Why this is a success story:</b> the pilot cost ninety minutes and saved the full-scale run
+  that would have gained +0.001; the kill rule saved ten more hours the moment the curve refused to
+  turn. And the compression goal the distillation was <em>for</em> was reached anyway — the smaller
+  edge model of Chapter&nbsp;10's frontier hit 0.857 trained on plain labels, no teacher involved.
+  A loop that measures cheaply can afford to be wrong cheaply. That is not a consolation prize;
+  it is the design working.</p>
+</div>
+
+<p>The distillation directions that still have genuine headroom here are the ones where the teacher
+provably knows something the student's labels do not: <strong>compression</strong> — distilling the
+big model into the small edge student, where teacher-above-student holds by construction — and
+<strong>pseudo-labeling</strong> genuinely unlabeled footage, where there is no ground truth for the
+teacher's boxes to duplicate, so every confident detection is new signal. Both wait on the same
+precondition the failed pilot exposed: first earn a teacher that is actually stronger than the
+student you intend to teach.</p>
 
 <h2><span class="secn">11.7</span> Epilogue — the pipeline is the product</h2>
 
@@ -273,8 +349,12 @@ turn it honestly, and turn it again.</p>
     the load-bearing wall — in a loop, leakage is a gradient the system will descend unless the
     Chapter&nbsp;5 guards forbid it.</li>
     <li><b>Time closes the loop twice:</b> a tracker turns flickering per-frame boxes into stable
-    tracks with their own metrics, and distillation lets your big model teach the small one. What
-    changes across problems is the objects and the sensor; the pipeline is the product, and it is
-    never finished — only turned again.</li>
+    tracks with their own metrics — metrics that diagnosed a fragmenting harness on their first run —
+    and distillation lets your big model teach the small one, but only a teacher that actually
+    outranks the student. What changes across problems is the objects and the sensor; the pipeline
+    is the product, and it is never finished — only turned again.</li>
+    <li><b>Cheap negatives are the loop working.</b> A ninety-minute pilot and a pre-committed kill
+    rule turned two doomed distillation ideas into sixteen saved GPU-hours and a written finding.
+    A system that can measure cheaply can afford to be wrong cheaply — design for it.</li>
   </ul>
 </div>

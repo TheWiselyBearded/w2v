@@ -31,7 +31,7 @@ online. The `.nojekyll` file tells Pages to serve the files as-is.
 2. The Shape of the System — the architecture the rest of the book hangs on
 
 **Part II — Manufacturing truth**
-3. Building Worlds — deterministic synthetic-data generation
+3. Building Worlds — deterministic synthetic-data generation, and generative set-dressing that keeps labels honest
 4. Truth From Geometry — deriving labels from the camera math
 5. Datasets That Don't Lie — immutable, leakage-guarded, license-gated data
 
@@ -42,8 +42,8 @@ online. The `.nojekyll` file tells Pages to serve the files as-is.
 
 **Part IV — Judgment & the loop**
 9. Measuring What Matters — honest evaluation and failure analysis
-10. Off the Desktop — export, quantization, and running on the edge
-11. Closing the Loop — the system that improves itself
+10. Off the Desktop — export, quantization, compilation, and the measured accuracy/latency frontier
+11. Closing the Loop — the system that improves itself, including its honest negative results
 
 ## How the site is built
 

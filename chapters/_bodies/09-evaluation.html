@@ -320,7 +320,16 @@ discipline is a set of habits that keep the ruler honest.</p>
   believe one word it says about the model.</p>
 </div>
 
-<p>Three more habits complete the hygiene:</p>
+<p>Four more habits complete the hygiene:</p>
+
+<p><strong>Cross-validate the ruler itself.</strong> When a second, independently written evaluator
+exists — a different matcher, a different codebase, even a training harness's built-in scorer — run
+both on the same artifact and compare. In this build, a newly written independent evaluator scored
+the best checkpoint within 0.002 of the training framework's own metric, across two different
+matching implementations. That agreement validated <em>both</em> instruments for the price of one
+run; a disagreement would have meant a bug in one of them, found before it could misgrade a model.
+Golden cases check an evaluator against known answers; a second evaluator checks it against an
+independent witness.</p>
 
 <p><strong>Report a sample count or confidence interval on every number.</strong> "AP 0.78" is an
 assertion; "AP 0.78 over 15,600 objects across 26 flights" is a measurement. A number without an N is a

@@ -66,6 +66,34 @@ the pinch point so neither side has to know about the other.</p>
   operation the exporter chose to write down.</p>
 </div>
 
+<div class="case">
+  <div class="case__head">
+    <h3>The model that couldn't leave the framework</h3>
+    <span class="verdict verdict--crit">what broke: exportability</span>
+  </div>
+  <p>In this build, the query-based detector — the accuracy leader of <a
+  href="06-detectors.html">Chapter&nbsp;6</a>'s bake-off — could not be exported to ONNX at all.
+  The framework's modern exporter failed outright on its graph. The model's own bundled exporter
+  fell back to an older tracing path and died on a single operation: the antialiased bicubic
+  interpolation its pretrained backbone uses to resize positional embeddings. That one op has no
+  ONNX translation at <em>any</em> opset version — verified at three of them. No flag, no upgrade,
+  no workaround; the best model was simply not deployable through the interchange boundary.</p>
+  <p>The grid-based detector, architecturally a stack of plain convolutions, exported on the first
+  try — configured to emit its raw head tensors, with box decoding kept in documented
+  post-processing code rather than baked into the graph. It became the deployable artifact.</p>
+  <div class="stats">
+    <div class="stat"><span class="v">3</span><span class="l">opsets tried for the query model</span></div>
+    <div class="stat"><span class="v">0</span><span class="l">successful exports</span></div>
+    <div class="stat"><span class="v">1</span><span class="l">unsupported op was enough</span></div>
+    <div class="stat"><span class="v">1st try</span><span class="l">grid model exported clean</span></div>
+  </div>
+  <p><b>The lesson:</b> exportability is an <em>architecture property</em>, discoverable on day one
+  with an untrained model — check it before you spend the training budget, not after. And the reason
+  this cost the project an afternoon instead of a schedule is Chapter&nbsp;6's whole thesis: the
+  detector was the swappable part, the two families had converged in accuracy, and swapping was a
+  config change. The pipeline absorbed the failure.</p>
+</div>
+
 <h2><span class="secn">10.2</span> Export parity is not free</h2>
 
 <p>Here is the assumption everyone makes and no one should: that the exported model computes the
@@ -150,7 +178,99 @@ false-alarm rate. If the regression exceeds tolerance, the model does not ship.<
   benchmark.</p>
 </div>
 
-<h2><span class="secn">10.4</span> Measure on the device, not the desktop</h2>
+<p>Here is that discipline executed, once, on this build's deployable detector. First the sizes —
+the wins the datasheet promises, and delivers:</p>
+
+<table>
+  <thead>
+    <tr><th>Precision</th><th>Model size</th><th>vs FP32</th><th>Max raw-output deviation vs FP32</th><th>Strict parity gate</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>FP32</td><td class="tnum">35.8&nbsp;MB</td><td class="tnum">1.0×</td><td class="tnum">0</td><td>pass</td></tr>
+    <tr><td>FP16</td><td class="tnum">17.9&nbsp;MB</td><td class="tnum">2.0×&nbsp;smaller</td><td class="tnum">0.13</td><td><b>fail</b></td></tr>
+    <tr><td>INT8</td><td class="tnum">9.2&nbsp;MB</td><td class="tnum">3.9×&nbsp;smaller</td><td class="tnum">0.23</td><td><b>fail</b></td></tr>
+  </tbody>
+</table>
+
+<p>Look at the last column. The export-parity gate of §10.2 — outputs must match within a tight
+numerical tolerance — <strong>fails both quantized models</strong>, with raw-output deviations a
+hundred times over its threshold. If that gate were the arbiter, both artifacts would be rejected.
+It must not be the arbiter, because it is answering the wrong question. Parity-within-tolerance was
+designed to catch an export that <em>silently changed the function</em>; quantization changes the
+numbers <em>by construction</em> and openly. The question that matters is not "are the logits
+identical?" but "are the <em>decisions</em> identical?" — and only the frozen benchmark can answer
+it. Same evaluation harness, same decode, same matching, all three artifacts:</p>
+
+<table>
+  <thead>
+    <tr><th>Precision</th><th>AP@50 on frozen benchmark</th><th>Δ vs FP32</th><th>Verdict</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>FP32</td><td class="tnum">0.874</td><td class="tnum">—</td><td>baseline</td></tr>
+    <tr><td>FP16</td><td class="tnum">0.874</td><td class="tnum"><b>0.000</b></td><td>task-identical, half the size</td></tr>
+    <tr><td>INT8</td><td class="tnum">0.872</td><td class="tnum"><b>−0.002</b></td><td>0.25% relative, for 3.9× smaller</td></tr>
+  </tbody>
+</table>
+
+<p>Quantization, here, is essentially accuracy-free — FP16 exactly so, INT8 for a quarter of a
+percent. That is the good news. The instructive news is the pair of gates: the chapter's opening
+figure drew a <em>parity gate</em> and an <em>accuracy gate</em> as two separate checks, and this is
+why they must be two. The parity gate polices the export — same function, faithfully translated. The
+accuracy gate polices quantization — changed function, unchanged decisions. Grade quantization with
+the parity gate and you will wrongly reject shippable artifacts; grade exports with only the task
+metric and a subtle export bug can hide inside the model's error bars. Two questions, two
+instruments.</p>
+
+<h2><span class="secn">10.4</span> The compiler is half the hardware</h2>
+
+<p>Sizes and accuracy are only half the promise; quantization's headline claim is <em>speed</em>.
+And here the field data delivers the chapter's rudest surprise. Benchmarked in the training
+framework on the target GPU, the FP16 model — the one that is task-identical and half the size — ran
+at <strong>0.6× the speed of FP32</strong>. Slower. Not a bug: the framework build did not dispatch
+optimal half-precision kernels for this particular silicon, and at batch size one a small model's
+per-layer conversion overhead swamps the arithmetic savings. Every spec sheet said FP16 should win;
+the measurement said it lost.</p>
+
+<p>The missing ingredient was an <span class="term">inference compiler</span> — a tool (TensorRT,
+in this build) that takes the exported graph and compiles it for one specific chip: fusing chains of
+operations into single kernels, choosing the fastest implementation of each layer for that exact
+silicon, and emitting a self-contained engine the runtime executes directly. Same weights, same
+graph, same GPU:</p>
+
+<table>
+  <thead>
+    <tr><th>Runtime</th><th>Latency / tile</th><th>Throughput</th><th>vs framework FP32</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Training framework, FP32</td><td class="tnum">5.9&nbsp;ms</td><td class="tnum">170&nbsp;fps</td><td class="tnum">1.0×</td></tr>
+    <tr><td>Training framework, FP16</td><td class="tnum">10.4&nbsp;ms</td><td class="tnum">96&nbsp;fps</td><td class="tnum"><b>0.6× — slower</b></td></tr>
+    <tr><td>Compiled engine, FP32</td><td class="tnum">2.3&nbsp;ms</td><td class="tnum">431&nbsp;fps</td><td class="tnum">2.5× — fusion alone</td></tr>
+    <tr><td>Compiled engine, FP16</td><td class="tnum"><b>1.1&nbsp;ms</b></td><td class="tnum"><b>927&nbsp;fps</b></td><td class="tnum"><b>5.4×</b></td></tr>
+  </tbody>
+</table>
+
+<p>Read that table slowly, because it rearranges the mental model. The same FP16 precision that
+<em>lost</em> to FP32 under one runtime <em>wins by 5.4×</em> under another. Compilation with no
+precision change at all was worth 2.5× purely from kernel fusion. And since §10.3 already
+established FP16 as task-identical on the frozen benchmark, the compiled FP16 engine is that rarest
+of engineering artifacts — a free lunch, but only after you have paid for both halves of the proof:
+the accuracy gate on the frozen benchmark <em>and</em> the latency measured on the target. A
+precision is not fast or slow. A <strong>precision-compiler-silicon triple</strong> is fast or slow,
+and the only way to know which you have is to measure the cell you intend to ship.</p>
+
+<div class="note note--warn">
+  <div class="note__label">⚠ The INT8 engine that refused to build</div>
+  <p>One cell stayed empty: the INT8 model that passed the accuracy gate would not compile at all.
+  The quantizer used <em>dynamic</em> quantization — computing value ranges on the fly at inference —
+  and the compiler's parser rejects that construction outright. A compiled INT8 engine wants the
+  §10.3 story done properly: <em>static</em> calibration, with ranges measured ahead of time over a
+  representative corpus and frozen into the engine. The lesson repeats the section's theme: each
+  runtime has opinions not just about which ops it supports but about <em>how a precision must be
+  expressed</em>. The INT8 speed win remains unclaimed until the calibration work is done — and the
+  honest ledger records it as open rather than assuming it.</p>
+</div>
+
+<h2><span class="secn">10.5</span> Measure on the device, not the desktop</h2>
 
 <p>Your desktop's inference speed is not a proxy for the vehicle's. Different chip, different memory
 bandwidth, different supported operators, different thermal reality. The only measurements that mean
@@ -176,7 +296,7 @@ flight, not for a demo.</p>
 <p>Report these numbers the way Chapter&nbsp;2's promotion gates want them: as measurements on the
 target, under sustained load, for the whole pipeline. The p99 is the honest budget. Design to it.</p>
 
-<h2><span class="secn">10.5</span> The hardware is a constraint you design around</h2>
+<h2><span class="secn">10.6</span> The hardware is a constraint you design around</h2>
 
 <div class="note note--warn">
   <div class="note__label">⚠ Choose the silicon before you choose the model</div>
@@ -195,7 +315,7 @@ condition on the whole design. The supported-operator list of your accelerator i
 your model's specification as its layer count. Read it before you commit to an architecture, not
 after you have trained one.</p>
 
-<h2><span class="secn">10.6</span> Tiling collides with the budget</h2>
+<h2><span class="secn">10.7</span> Tiling collides with the budget</h2>
 
 <p>Recall the small-object machinery from <a href="08-tiny-objects.html">Chapter&nbsp;8</a>: to keep
 twenty-pixel objects alive, we run the detector on tiles — cropped sub-frames at higher effective
@@ -230,7 +350,29 @@ not a modeling preference.</figcaption>
 and defending it with numbers measured on the target. That is why this chapter belongs to systems
 engineering as much as to machine learning.</p>
 
-<h2><span class="secn">10.7</span> The runtime plane, briefly</h2>
+<p>And the surface is kinder than the diagram's gloom suggests, once §10.4's compiler enters the
+picture. At ~1&nbsp;ms per tile from the compiled FP16 engine, even full sliced coverage of a large
+sensor frame — thirty tiles — costs about 30&nbsp;ms of detector compute. The technique this section
+called the single most expensive thing you can do to your budget became affordable not by using fewer
+tiles or a weaker model, but by making each tile radically cheaper. The knobs interact; turn the
+right one and the others relax.</p>
+
+<p>The model-size knob got its own measured data point. Retraining the same detector one size down —
+the "tiny" variant of the same family, same data, same recipe — produced this frontier:</p>
+
+<div class="stats">
+  <div class="stat"><span class="v">−0.019</span><span class="l">AP@50 (0.876 → 0.857), 2.2% relative</span></div>
+  <div class="stat"><span class="v">+29%</span><span class="l">throughput (927 → 1193 fps compiled FP16)</span></div>
+  <div class="stat"><span class="v">−44%</span><span class="l">model size (35.8 → 20.2 MB)</span></div>
+  <div class="stat"><span class="v">2</span><span class="l">measured points on the trade surface</span></div>
+</div>
+
+<p>That is what a defensible point looks like: not "the small model is probably fine" but a priced
+trade — two percent of accuracy for a third more throughput and half the memory — that a deployment
+review can accept or decline with open eyes. Whether it is the right trade depends on the vehicle's
+budget; that it is a <em>known</em> trade is what this chapter has been arguing for all along.</p>
+
+<h2><span class="secn">10.8</span> The runtime plane, briefly</h2>
 
 <p>What actually runs on the vehicle is deliberately, almost boringly simple — and that simplicity
 is a safety feature, the boundary from <a href="02-the-system.html">Chapter&nbsp;2 §2.6</a> made
@@ -244,15 +386,18 @@ delivery drone's sense-and-avoid, an airport's airspace monitor, or a wildlife s
 change — and it is what keeps the edge software small enough to reason about, test, and trust. The
 line is short on purpose. Every box you do not add to it is a box that cannot fail in flight.</p>
 
-<h2><span class="secn">10.8</span> Across the seam</h2>
+<h2><span class="secn">10.9</span> Across the seam</h2>
 
 <p>The crossing has a shape now. Export through ONNX so the runtime never depends on your training
-framework. Gate on parity so the exported function — weights <em>and</em> preprocessing — matches
+framework — and check that your architecture <em>can</em> export before you spend the training
+budget on it. Gate on parity so the exported function — weights <em>and</em> preprocessing — matches
 the trained one bit for bit within tolerance. Quantize for the speed and memory the edge demands,
-then re-measure on the frozen benchmark so a quantization regression cannot hide. Measure latency
-percentiles, throughput, memory, and sustained thermals on the real device, across the whole
-pipeline. And choose your point on the accuracy-vs-latency-vs-power surface with the hardware's
-supported operators and the tiling budget both in view from the start.</p>
+then re-measure on the frozen benchmark so a quantization regression cannot hide — and grade the
+quantized model on its decisions, not its logits. Compile for the target, because the speed lives in
+the precision-compiler-silicon triple, not the model file. Measure latency percentiles, throughput,
+memory, and sustained thermals on the real device, across the whole pipeline. And choose your point
+on the accuracy-vs-latency-vs-power surface with the hardware's supported operators and the tiling
+budget both in view from the start.</p>
 
 <p>A model that survives all of that is a model that finally does something the offline plane never
 could: it runs in the world and generates real footage of real skies, including real failures the
@@ -267,16 +412,24 @@ training it came from. That is <a href="11-closing-the-loop.html">Chapter&nbsp;1
     single export step; treat that crossing as a systems problem, not a modeling afterthought.</li>
     <li><b>ONNX is the narrow waist for models.</b> Export to a neutral graph so the runtime never
     depends on your training framework — the same discipline the canonical record gave the data.</li>
+    <li><b>Exportability is an architecture property.</b> One unsupported operator kept the
+    best model from crossing at all; the check costs minutes with an untrained model, and a
+    swappable-detector design turns the failure into a config change instead of a lost schedule.</li>
     <li><b>Gate on export parity, including preprocessing.</b> Assert the exported model matches the
     trained one within tolerance on identical inputs — and pin the entire pixel chain, because same
     weights with different pixels is garbage on-device.</li>
-    <li><b>Quantize, then re-measure.</b> INT8 buys speed and memory for a usually-small accuracy
-    cost, but a quantization regression on small objects is real — verify on the frozen benchmark or
-    do not ship.</li>
+    <li><b>Quantize, then re-measure — on the task metric.</b> The strict parity gate rightly fails
+    quantized models, whose numerics change by construction; the frozen benchmark showed FP16
+    task-identical and INT8 down 0.002 AP at 3.9× smaller. Two gates, two questions: parity polices
+    the export, accuracy polices quantization.</li>
+    <li><b>The compiler is half the hardware.</b> The same FP16 weights ran 0.6× under the training
+    framework and 5.4× (927 fps, ~1 ms/tile) as a compiled engine — speed belongs to the
+    precision-compiler-silicon triple, so measure the exact cell you intend to ship.</li>
     <li><b>Measure on the device, at the tail.</b> p50/p95/p99 latency, throughput, peak memory, and
     sustained thermals — on the target, across the full pipeline. The p99 is the honest budget.</li>
     <li><b>Tiling, resolution, model size, and precision are one trade surface.</b> Deployment is
     choosing a point on it that clears accuracy, latency, and thermal limits together — argued with
-    device measurements, not preference.</li>
+    device measurements, not preference. The measured frontier here: one model size down cost 2.2%
+    relative accuracy and bought +29% throughput and −44% memory.</li>
   </ul>
 </div>

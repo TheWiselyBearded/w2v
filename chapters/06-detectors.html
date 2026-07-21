@@ -301,6 +301,19 @@ its scale, its diversity, and how faithfully it matches the real sky. That is pr
 and IV — building better data and closing the loop on failures — dominate this book, and this
 chapter is comparatively short.</p>
 
+<div class="note">
+  <div class="note__label">▸ How the race actually ended</div>
+  <p>The convergence table has an epilogue worth recording. Trained past the bake-off — six epochs
+  instead of four — the grid model kept climbing and settled at <strong>0.876</strong>, its
+  plain-labels ceiling. The small query model, given the same longer schedule, <em>declined</em>
+  from its very first checkpoint: its best was ~0.867, already behind it — a capacity ceiling, not
+  under-training. And the deciding vote came from neither number: when deployment arrived
+  (<a href="10-deployment.html">Chapter&nbsp;10</a>), the query model could not be exported off its
+  training framework at all, while the grid model crossed cleanly. The fast-iterating,
+  boringly-exportable architecture became the product. "Swappable" stopped being a design nicety and
+  became the reason the schedule survived.</p>
+</div>
+
 <blockquote>The detector is the most swappable component in the system. Choose it for how it fits
 your iteration loop, not for a leaderboard — the data decides the ceiling.</blockquote>
 
@@ -329,7 +342,8 @@ applies: keep it swappable, and let evidence, not fashion, decide when to make i
     <li><b>Reproducibility is hard; compare the EMA checkpoint you ship, not the noisy last step,</b>
     pin deterministic GPU settings, and grow tiny validation sets.</li>
     <li><b>Data dominates architecture.</b> Two models converge as data scales (0.857 vs 0.841 at
-    full scale) — so the detector is swappable, and the data is the product.</li>
+    full scale; 0.876 with a longer schedule) — so the detector is swappable, and the data is the
+    product. In the end, exportability — not accuracy — picked the winner.</li>
   </ul>
 </div>
 
