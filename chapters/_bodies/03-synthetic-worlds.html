@@ -305,7 +305,81 @@ way it never learns which engine drew them.</p>
   with a strength knob, a seed, and a license you have read.</p>
 </div>
 
-<h2><span class="secn">3.8</span> What "done" looks like</h2>
+<h2><span class="secn">3.8</span> When the set dressing moves: generative video</h2>
+
+<p>The image-to-image pass has a weakness it cannot fix from inside a single frame: time. Run it
+independently over thirty consecutive frames and you get thirty independently plausible opinions
+about what the terrain should look like — and the disagreement between them reads as shimmer when
+played back. The fix is not a cleverer image model. It is a <span class="term">video diffusion
+model</span>, which denoises the whole clip jointly, so frame seventeen and frame eighteen are two
+views of one imagined world rather than two imagined worlds.</p>
+
+<p>Video models also unlock something the low-strength image pass deliberately forbids: changing the
+<em>world</em> instead of just its surfaces. The mechanism is
+<span class="term">structure-conditioned video-to-video</span>. From every rendered frame, extract a
+<span class="term">control video</span> — per-frame depth maps, edge maps, or segmentation — and hand
+it to the model as a spatial constraint alongside a text prompt. The prompt decides what the world
+is (&ldquo;dense pine forest, dappled sunlight&rdquo;); the control video decides where everything
+sits and how the camera moves. Because the control signal <em>is</em> the engine's geometry, the
+composition survives by construction: in this build's first real run, an airfield became a forest —
+and the runway came back as a dirt road on the same diagonal, the hangars as buildings in the same
+place, the camera's motion carried through frame-for-frame. Structure is the skeleton; the prompt is
+wardrobe.</p>
+
+<p>This gives the set-dressing stage two distinct tools, and it pays to name them:</p>
+
+<ul>
+  <li><strong>Style transfer</strong> — keep the world, change the surfaces. The image pass of §3.7,
+  or a video model run with the source frames as a strong condition. Use it to close the texture gap
+  on the environment the scenario already describes.</li>
+  <li><strong>Re-environmenting</strong> — keep the structure, change the world. One rendered
+  sequence becomes a forest, a desert, a snowfield, a coastline: four environment variations for the
+  cost of one render and four prompts, all sharing the geometry the labels were computed from. This
+  is domain randomization applied <em>after</em> rendering, at a realism level the engine cannot
+  reach.</li>
+</ul>
+
+<div class="note note--warn">
+  <div class="note__label">⚠ The control signal must be dense enough to hold</div>
+  <p>Not every structure signal can carry the weight. This build's first attempt conditioned on Canny
+  edges — and over a sparse aerial scene the edge frames were 99% black, so the model listened to the
+  prompt instead: gorgeous forest, no horizon, composition gone. Switching the control to per-frame
+  <strong>monocular depth</strong> — dense over every pixel — pinned it. The general law: a control
+  video only constrains where it has signal. Sparse scenes need dense controls; if the composition
+  matters, condition on depth or segmentation, and treat edges as a bonus constraint, not the
+  backbone.</p>
+</div>
+
+<p>Video models bring one mechanical quirk the pipeline must absorb: they generate
+<em>fixed-length</em> clips. An architecture has a native window — often a &ldquo;4k&nbsp;+&nbsp;1
+frames&rdquo; constraint, with sweet spots around 81 or 121 frames — and a longer sequence does not
+fit in one call. The answer is <span class="term">frame extension</span>: generate the sequence in
+overlapping chunks, seed each chunk deterministically, and crossfade the overlap so seams do not
+pop. Free-running video generation drifts when extended this way — each chunk invents a slightly
+different world. Structure-conditioned generation largely does not, because every chunk is pinned to
+the <em>source</em> control video for its own span; the drift has nowhere to go. Sequences whose
+lengths miss the 4k+1 grid are padded by repeating the final control frame, and the padding frames
+are dropped on the way out.</p>
+
+<p>Label safety inherits the §3.7 argument, strengthened. The image pass protects labels with a low
+edit strength — a statistical promise. The video pass protects them with the control video — a
+structural one: the model paints appearance onto geometry it is not permitted to move, so a target
+that spans a box in the render spans that box in the output. Box compositing (§3.7) remains as
+belt-and-suspenders. And nothing else relaxes: the weights are an asset with a license that goes
+through the Chapter&nbsp;5 gate (this build's video model ships under Apache-2.0 precisely so that
+gate stays green; the more famous alternative carries guardrail and attribution obligations worth
+reading before a customer does), the output is a new derived sequence with an
+<code>enhancement</code> provenance block, and the per-chunk seeds hash from source-frame content.
+The renderer got smarter; the discipline did not change.</p>
+
+<p>A last practical note: a 1.3-billion-parameter video model at 25 denoising steps costs on the
+order of twenty seconds per frame on a desk-side GPU — minutes for a two-second clip, an hour-scale
+job for a thirty-second one. That economics shapes the workflow: an interactive server lets the
+world-builder's editor post a short clip and eyeball the result in minutes, and the validated recipe
+then runs as a batch job over full sequences. Sketch interactively, produce industrially — the same
+split as §3.7's API-sketchpad versus local-production rule, one level up.</p>
+
+<h2><span class="secn">3.9</span> What "done" looks like</h2>
 
 <p>How do you know the world-builder is good enough? Not by looking at the images and admiring them.
 Prettiness is a trap — a gorgeous renderer that does not transfer to real footage is worthless, and a
