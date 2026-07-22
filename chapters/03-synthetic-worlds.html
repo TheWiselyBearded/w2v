@@ -366,10 +366,11 @@ views of one imagined world rather than two imagined worlds.</p>
 it to the model as a spatial constraint alongside a text prompt. The prompt decides what the world
 is (&ldquo;dense pine forest, dappled sunlight&rdquo;); the control video decides where everything
 sits and how the camera moves. Because the control signal <em>is</em> the engine's geometry, the
-composition survives by construction: in this build's first real run, an airfield became a forest —
-and the runway came back as a dirt road on the same diagonal, the hangars as buildings in the same
-place, the camera's motion carried through frame-for-frame. Structure is the skeleton; the prompt is
-wardrobe.</p>
+composition survives <em>wherever the control is honest</em> — and where the control lies, it breaks
+in exactly the way the control lied. Done right, the ground below the horizon becomes a photoreal
+forest while the horizon, the framing, and the camera's motion carry through frame-for-frame; the
+sky, and the airborne targets in it, are held untouched. Structure is the skeleton and the prompt is
+wardrobe — but only where the skeleton is real, which took two debugging passes to get right (below).</p>
 
 <p>This gives the set-dressing stage two distinct tools, and it pays to name them:</p>
 
@@ -385,14 +386,21 @@ wardrobe.</p>
 </ul>
 
 <div class="note note--warn">
-  <div class="note__label">⚠ The control signal must be dense enough to hold</div>
-  <p>Not every structure signal can carry the weight. This build's first attempt conditioned on Canny
-  edges — and over a sparse aerial scene the edge frames were 99% black, so the model listened to the
-  prompt instead: gorgeous forest, no horizon, composition gone. Switching the control to per-frame
-  <strong>monocular depth</strong> — dense over every pixel — pinned it. The general law: a control
-  video only constrains where it has signal. Sparse scenes need dense controls; if the composition
-  matters, condition on depth or segmentation, and treat edges as a bonus constraint, not the
-  backbone.</p>
+  <div class="note__label">⚠ A control video constrains only where it tells the truth</div>
+  <p>Two failures on this build's first runs, one root cause. First, conditioning on Canny edges: over
+  a sparse aerial scene the edge frames were 99% black, so the model ignored them and obeyed the
+  prompt — gorgeous forest, no horizon, composition gone. Per-frame <strong>monocular depth</strong>,
+  dense over every pixel, fixed that. Then a subtler one: monocular depth cannot tell <em>sky</em>
+  from <em>very far terrain</em> — both read as maximum distance — so the model filled the sky with
+  distant canopy and collapsed a low, level shot into an aerial look-down. The fix is to stop trusting
+  the control where it is blind: detect the sky (the far region in the upper frame) and
+  <strong>mask it out</strong>, keeping the original pixels there and regenerating only the ground
+  below the horizon. The general law: a control video constrains only where it carries real signal —
+  find the regions where it is <em>absent</em> (sparse edges) or <em>actively wrong</em>
+  (sky-as-far-terrain) and either enrich the control or mask those regions away. For airborne
+  perception this lands conveniently: the targets live in the sky, which you must preserve anyway, so
+  &ldquo;keep the sky, re-environment the ground&rdquo; is both the honest fix and the right
+  behavior — at the cost that the transformed world only fills the frame below the horizon.</p>
 </div>
 
 <p>Video models bring one mechanical quirk the pipeline must absorb: they generate
